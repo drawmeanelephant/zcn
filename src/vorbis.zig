@@ -45,6 +45,18 @@ const initial_decode_buffer = 256 * 1024;
 /// stream whose setup claims more is refused outright instead of decoded.
 const max_decode_buffer = 16 * 1024 * 1024;
 
+/// #14: flat ceiling on decoded output, in interleaved f32 samples
+/// (frames x channels). The wire side bounds a transfer's bytes, but
+/// Vorbis expands arbitrarily — the issue's silence repro decodes ~1500x,
+/// so a wire byte cap implies nothing about decoded size. The bound has
+/// to come from the protocol: interval length is bpi*60/bpm seconds, the
+/// documented server clamps (bpm 40..400, bpi 2..128 — PROTOCOL.md §6.1)
+/// cap a legitimate interval at 192 s, and a conforming peer encodes one
+/// mono stream at the session rate. 32 Mi samples is ~700 s of 48 kHz
+/// mono (~350 s stereo, ~350 s of 96 kHz mono) — far past any conforming
+/// interval — while capping decoded memory at 128 MiB.
+pub const max_decoded_samples: usize = 32 * 1024 * 1024;
+
 pub const StbVorbisInfo = extern struct {
     sample_rate: c_uint,
     channels: c_uint,
@@ -83,7 +95,7 @@ pub const Decoded = struct {
     }
 };
 
-pub const DecodeError = error{ OpenFailed, OutOfMemory };
+pub const DecodeError = error{ OpenFailed, StreamTooLong, OutOfMemory };
 
 /// Decode a complete Ogg Vorbis stream (one interval's accumulated bytes).
 ///
@@ -93,6 +105,13 @@ pub const DecodeError = error{ OpenFailed, OutOfMemory };
 /// stream whose setup doesn't fit fails with error.OpenFailed, not a wild
 /// free().
 pub fn decodeMemory(alloc: std.mem.Allocator, ogg: []const u8) DecodeError!Decoded {
+    return decodeMemoryCapped(alloc, ogg, max_decoded_samples);
+}
+
+/// decodeMemory with an explicit decoded-sample ceiling instead of
+/// max_decoded_samples — tests trip the refusal path without encoding
+/// ~700 s of audio.
+pub fn decodeMemoryCapped(alloc: std.mem.Allocator, ogg: []const u8, max_samples: usize) DecodeError!Decoded {
     var buf_len: usize = initial_decode_buffer;
     while (true) {
         const buf = try alloc.alignedAlloc(u8, .@"16", buf_len);
@@ -124,11 +143,16 @@ pub fn decodeMemory(alloc: std.mem.Allocator, ogg: []const u8) DecodeError!Decod
             const n = stb_vorbis_get_frame_float(v, &chans, &outputs);
             if (n == 0) break;
             const ch: usize = @intCast(chans);
+            const ns: usize = @intCast(n);
+            // #14: refuse rather than grow past the ceiling — the decoded
+            // buffer stays under max_samples whatever the stream expands to
+            if (ns * ch > max_samples - out.items.len) return error.StreamTooLong;
+            try out.ensureUnusedCapacity(alloc, ns * ch);
             var i: usize = 0;
-            while (i < @as(usize, @intCast(n))) : (i += 1) {
+            while (i < ns) : (i += 1) {
                 var k: usize = 0;
                 while (k < ch) : (k += 1) {
-                    try out.append(alloc, outputs[k][i]);
+                    out.appendAssumeCapacity(outputs[k][i]);
                 }
             }
         }
@@ -353,4 +377,57 @@ test "hostile comment counts are refused, not crashed on" {
         defer alloc.free(bytes);
         try testing.expectError(error.OpenFailed, decodeMemory(alloc, bytes));
     }
+}
+
+/// Encodes `seconds` of 48 kHz mono silence — the maximal-expansion case
+/// from #14 (~1500x on the wire).
+fn encodeSilence(alloc: std.mem.Allocator, seconds: u32) ![]u8 {
+    const enc = try Encoder.create(alloc, 48000, 0.0, 4242);
+    defer enc.destroy();
+    var ogg: std.ArrayList(u8) = .empty;
+    errdefer ogg.deinit(alloc);
+    try enc.writeHeaders(&ogg);
+    const block: [960]f32 = @splat(0);
+    for (0..seconds * 50) |_| try enc.encode(&block, &ogg);
+    try enc.flush(&ogg);
+    return ogg.toOwnedSlice(alloc);
+}
+
+// #14: decoded PCM was unbounded — a 15 KB silence interval expanded to
+// 23 MB of f32, and at the 16 MiB wire cap a single interval would have
+// wanted ~24 GB. The decoded-sample ceiling turns that into a clean
+// refusal instead of an OOM. decodeMemoryCapped trips it without having
+// to encode ~700 s of audio.
+test "decoded output past the ceiling is refused, not grown until OOM" {
+    const alloc = testing.allocator;
+    const bytes = try encodeSilence(alloc, 2); // 96000 samples
+    defer alloc.free(bytes);
+
+    // a ceiling below the stream's decoded length: clean refusal
+    try testing.expectError(error.StreamTooLong, decodeMemoryCapped(alloc, bytes, 48000));
+    // a ceiling that fits it: the same bytes decode fine
+    var dec = try decodeMemoryCapped(alloc, bytes, 2 * 96000);
+    defer dec.deinit();
+    try testing.expectEqual(@as(u32, 48000), dec.srate);
+    try testing.expectEqual(@as(u32, 1), dec.channels);
+    try testing.expect(dec.frames() > 48000);
+}
+
+// #14 end-to-end at the production ceiling: the longest conforming
+// interval (bpi 128 @ bpm 40 = 192 s, PROTOCOL.md §6.1) must still decode,
+// while a stream long enough to have blown tens of GB before the fix —
+// 720 s of silence is ~35M decoded samples, past max_decoded_samples — is
+// refused with StreamTooLong.
+test "decode ceiling keeps legitimate intervals, refuses hostile length" {
+    const alloc = testing.allocator;
+
+    const legit = try encodeSilence(alloc, 200); // past the 192 s protocol max
+    defer alloc.free(legit);
+    var dec = try decodeMemory(alloc, legit);
+    defer dec.deinit();
+    try testing.expect(dec.frames() > 190 * 48000);
+
+    const hostile = try encodeSilence(alloc, 720);
+    defer alloc.free(hostile);
+    try testing.expectError(error.StreamTooLong, decodeMemory(alloc, hostile));
 }
