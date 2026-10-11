@@ -81,8 +81,9 @@ pub const Stats = struct {
 
     intervals_downloaded: u64 = 0,
     download_bytes: u64 = 0,
-    /// transfers dropped for exceeding their byte limit or for sitting past
-    /// download_timeout_ms without a final write
+    /// transfers dropped for exceeding their byte limit, for sitting past
+    /// download_timeout_ms without a final write, or for decoding past the
+    /// decoded-sample ceiling
     downloads_aborted: u64 = 0,
     samples_decoded: u64 = 0,
 
@@ -783,6 +784,9 @@ pub const Session = struct {
             return;
         }
         var dec = vorbis.decodeMemory(self.alloc, d.buf.items()) catch |e| {
+            // #14: a stream that decodes past the sample ceiling is a
+            // dropped transfer like an over-limit or expired one
+            if (e == error.StreamTooLong) self.stats.downloads_aborted += 1;
             self.log.line("DECODE FAILED user={s}: {s}", .{ d.user.nameSlice(), @errorName(e) });
             d.active = false;
             d.buf.clear();
@@ -793,15 +797,22 @@ pub const Session = struct {
         self.log.line("decoded user={s} ch={d} srate={d} ch={d} frames={d} rms={d:.6}", .{
             d.user.nameSlice(), d.chidx, dec.srate, dec.channels, dec.frames(), dec.rms(),
         });
-        // downmix to mono for the dump
+        // downmix to mono for the dump. Conforming peers send mono, which
+        // needs no second buffer; for multichannel streams the copy is
+        // frames-sized and already bounded by decodeMemory's ceiling (#14),
+        // so a hostile stream can't double its memory here either.
         if (dec.channels >= 1) {
-            const mono = try self.alloc.alloc(f32, dec.frames());
-            defer self.alloc.free(mono);
-            for (0..dec.frames()) |i| {
-                var s: f32 = 0;
-                for (0..dec.channels) |k| s += dec.pcm[i * dec.channels + k];
-                mono[i] = s / @as(f32, @floatFromInt(dec.channels));
-            }
+            var mono_buf: []f32 = &.{};
+            defer if (mono_buf.len > 0) self.alloc.free(mono_buf);
+            const mono: []const f32 = if (dec.channels == 1) dec.pcm else blk: {
+                mono_buf = try self.alloc.alloc(f32, dec.frames());
+                for (0..dec.frames()) |i| {
+                    var s: f32 = 0;
+                    for (0..dec.channels) |k| s += dec.pcm[i * dec.channels + k];
+                    mono_buf[i] = s / @as(f32, @floatFromInt(dec.channels));
+                }
+                break :blk mono_buf;
+            };
             const out = self.findOrOpenOutput(d.user.nameSlice(), d.chidx, dec.srate) catch |e| {
                 self.log.line("wav open failed: {s}", .{@errorName(e)});
                 d.active = false;
