@@ -63,7 +63,7 @@ fn addVendored(mod: *std.Build.Module, target: std.Build.ResolvedTarget) void {
     } else if (target.result.os.tag == .windows) {
         // miniaudio's Windows backends (WASAPI, DirectSound, WinMM): the header
         // carries no pragma-comment libs, so name the import libraries here.
-        inline for (.{ "winmm", "dsound", "dxguid", "ole32", "avrt", "ksuser", "uuid" }) |lib| {
+        inline for (.{ "winmm", "dsound", "dxguid", "ole32", "avrt", "ksuser", "uuid", "ws2_32" }) |lib| {
             mod.linkSystemLibrary(lib, .{});
         }
     }

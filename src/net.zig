@@ -1,10 +1,89 @@
 //! TCP transport with NINJAM message framing (docs/PROTOCOL.md §1, §2).
 //! Frame = 1 type byte + uint32 LE size (<= 16384) + payload.
-//! Built directly on std.posix to stay stable across zig std churn.
+//! POSIX builds sit directly on std.posix; Windows sits on winsock2.
+//! Zig 0.17's std.os.windows.ws2_32 ships the constants/types but not the
+//! function externs (std.c getaddrinfo/pollfd are unportable there), so the
+//! winsock entry points are declared locally below.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const bufmod = @import("buf.zig");
 const clock = @import("clock.zig");
+
+const is_windows = builtin.os.tag == .windows;
+
+/// Winsock2 surface used by Conn. SOCKET is UINT_PTR.
+const winsock = if (is_windows) struct {
+    pub const socket_t = usize;
+    pub const invalid_socket: socket_t = ~@as(socket_t, 0);
+    const socket_error: c_int = -1;
+
+    const AF_INET: c_int = 2;
+    const SOCK_STREAM: c_int = 1;
+    const IPPROTO_TCP: c_int = 6;
+    const TCP_NODELAY: c_int = 1;
+
+    const WSAEINTR: c_int = 10004;
+    const WSAEWOULDBLOCK: c_int = 10035;
+    const WSAEINPROGRESS: c_int = 10036;
+    const WSAEISCONN: c_int = 10056;
+
+    const POLLIN: i16 = 0x0300; // POLLRDNORM | POLLRDBAND
+    const POLLOUT: i16 = 0x0010; // POLLWRNORM
+
+    const FIONBIO: c_int = @bitCast(@as(u32, 0x8004667E)); // _IOW('f', 126, u_long)
+
+    const sockaddr_in = extern struct {
+        family: u16 = AF_INET,
+        port: u16 = 0, // big-endian
+        addr: u32 = 0, // big-endian
+        zero: [8]u8 = @splat(0),
+    };
+
+    const addrinfo = extern struct {
+        flags: c_int = 0,
+        family: c_int = 0,
+        socktype: c_int = 0,
+        protocol: c_int = 0,
+        addrlen: usize = 0,
+        canonname: ?[*:0]u8 = null,
+        addr: ?*anyopaque = null,
+        next: ?*addrinfo = null,
+    };
+
+    const pollfd = extern struct {
+        fd: socket_t,
+        events: i16,
+        revents: i16,
+    };
+
+    extern "ws2_32" fn WSAStartup(wVersionRequested: u16, lpWSAData: *anyopaque) callconv(.winapi) c_int;
+    extern "ws2_32" fn socket(af: c_int, type: c_int, protocol: c_int) callconv(.winapi) socket_t;
+    extern "ws2_32" fn connect(s: socket_t, name: *const anyopaque, namelen: c_int) callconv(.winapi) c_int;
+    extern "ws2_32" fn send(s: socket_t, buf: [*]const u8, len: c_int, flags: c_int) callconv(.winapi) c_int;
+    extern "ws2_32" fn recv(s: socket_t, buf: [*]u8, len: c_int, flags: c_int) callconv(.winapi) c_int;
+    extern "ws2_32" fn closesocket(s: socket_t) callconv(.winapi) c_int;
+    extern "ws2_32" fn ioctlsocket(s: socket_t, cmd: c_int, argp: *c_ulong) callconv(.winapi) c_int;
+    extern "ws2_32" fn setsockopt(s: socket_t, level: c_int, optname: c_int, optval: ?*const anyopaque, optlen: c_int) callconv(.winapi) c_int;
+    extern "ws2_32" fn WSAPoll(fdArray: [*]pollfd, fdCount: c_ulong, timeout: c_int) callconv(.winapi) c_int;
+    extern "ws2_32" fn WSAGetLastError() callconv(.winapi) c_int;
+    extern "ws2_32" fn getaddrinfo(pNodeName: ?[*:0]const u8, pServiceName: ?[*:0]const u8, pHints: ?*const addrinfo, ppResult: *?*addrinfo) callconv(.winapi) c_int;
+    extern "ws2_32" fn freeaddrinfo(pAddrInfo: ?*addrinfo) callconv(.winapi) void;
+
+    var booted = false;
+
+    /// Sessions are single-threaded (session.zig), so a plain flag suffices
+    /// for the once-only WSAStartup.
+    fn ensureStartup() !void {
+        if (booted) return;
+        var data: [512]u8 align(16) = undefined; // WSADATA, opaque to us
+        if (WSAStartup(0x0202, &data) != 0) return error.SystemResources;
+        booted = true;
+    }
+};
+
+const sock_t = if (is_windows) winsock.socket_t else std.posix.socket_t;
+const invalid_socket: sock_t = if (is_windows) winsock.invalid_socket else -1;
 
 pub const max_payload: u32 = 16384;
 
@@ -21,7 +100,7 @@ pub const Error = error{
 
 pub const Conn = struct {
     io: std.Io = undefined,
-    fd: std.posix.socket_t = -1,
+    fd: sock_t = invalid_socket,
 
     rbuf: [65536]u8 = undefined,
     rhead: usize = 0,
@@ -31,17 +110,44 @@ pub const Conn = struct {
     last_send_ms: i64 = 0,
 
     pub fn connect(io: std.Io, host: []const u8, port: u16) !Conn {
+        if (is_windows) try winsock.ensureStartup();
+
         // fast path: dotted-quad IPv4 literal
         if (std.Io.net.Ip4Address.parse(host, port)) |ip4| {
             const sa = sockaddrIn(ip4);
             return connectSockaddr(io, &sa);
         } else |_| {}
 
-        // hostname: getaddrinfo (libc)
+        // hostname: getaddrinfo
         const host_z = std.heap.page_allocator.dupeSentinel(u8, host, 0) catch return error.SystemResources;
         defer std.heap.page_allocator.free(host_z);
         var port_buf: [16]u8 = undefined;
         const port_str = std.mem.printSentinel(&port_buf, "{d}", .{port}, 0) catch return error.UnknownHost;
+
+        if (is_windows) {
+            const hints: winsock.addrinfo = .{
+                .family = winsock.AF_INET,
+                .socktype = winsock.SOCK_STREAM,
+                .protocol = winsock.IPPROTO_TCP,
+            };
+            var res: ?*winsock.addrinfo = null;
+            if (winsock.getaddrinfo(host_z.ptr, port_str.ptr, &hints, &res) != 0 or res == null) return error.UnknownHost;
+            defer winsock.freeaddrinfo(res);
+
+            var it: ?*winsock.addrinfo = res;
+            while (it) |ai| : (it = ai.next) {
+                if (ai.addrlen == 0 or ai.addr == null) continue;
+                const fd = openStreamSocket() catch continue;
+                setNoDelay(fd);
+                if (winsock.connect(fd, ai.addr.?, @intCast(ai.addrlen)) != 0) {
+                    closeFd(fd);
+                    continue;
+                }
+                setNonblocking(fd);
+                return connected(io, fd);
+            }
+            return error.UnknownHost;
+        }
 
         const hints: std.posix.addrinfo = .{
             .flags = .{},
@@ -62,7 +168,7 @@ pub const Conn = struct {
         while (it) |ai| : (it = ai.next) {
             if (ai.addrlen == 0 or ai.addr == null) continue;
             const fd = openStreamSocket() catch continue;
-            std.posix.setsockopt(fd, std.posix.IPPROTO.TCP, 1, &std.mem.toBytes(@as(c_int, 1))) catch {};
+            setNoDelay(fd);
             switch (std.posix.errno(std.posix.system.connect(fd, @ptrCast(@alignCast(ai.addr.?)), @intCast(ai.addrlen)))) {
                 .SUCCESS, .INTR, .INPROGRESS, .ISCONN => {},
                 else => {
@@ -76,26 +182,52 @@ pub const Conn = struct {
         return error.UnknownHost;
     }
 
-    fn openStreamSocket() !std.posix.socket_t {
+    fn openStreamSocket() !sock_t {
+        if (is_windows) {
+            const s = winsock.socket(winsock.AF_INET, winsock.SOCK_STREAM, winsock.IPPROTO_TCP);
+            if (s == winsock.invalid_socket) return error.SocketOpen;
+            return s;
+        }
         const rc = std.posix.system.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, std.posix.IPPROTO.TCP);
         if (std.posix.errno(rc) != .SUCCESS) return error.SocketOpen;
         return @intCast(rc);
     }
 
-    fn closeFd(fd: std.posix.socket_t) void {
+    fn closeFd(fd: sock_t) void {
+        if (is_windows) {
+            _ = winsock.closesocket(fd);
+            return;
+        }
         _ = std.posix.errno(std.posix.system.close(fd));
     }
 
-    fn setNonblocking(fd: std.posix.socket_t) void {
+    fn setNonblocking(fd: sock_t) void {
+        if (is_windows) {
+            var mode: c_ulong = 1;
+            _ = winsock.ioctlsocket(fd, winsock.FIONBIO, &mode);
+            return;
+        }
         const flags = std.c.fcntl(fd, std.c.F.GETFL, @as(c_int, 0));
         _ = std.c.fcntl(fd, std.c.F.SETFL, flags | 0o4000);
     }
 
-    fn sockaddrIn(ip4: std.Io.net.Ip4Address) std.posix.sockaddr.in {
-        const In = std.posix.sockaddr.in;
+    fn setNoDelay(fd: sock_t) void {
+        // latency-sensitive protocol: TCP_NODELAY
+        const one: c_int = 1;
+        if (is_windows) {
+            _ = winsock.setsockopt(fd, winsock.IPPROTO_TCP, winsock.TCP_NODELAY, &one, @sizeOf(c_int));
+            return;
+        }
+        std.posix.setsockopt(fd, std.posix.IPPROTO.TCP, 1, &std.mem.toBytes(one)) catch {};
+    }
+
+    const sockaddr_in_t = if (is_windows) winsock.sockaddr_in else std.posix.sockaddr.in;
+
+    fn sockaddrIn(ip4: std.Io.net.Ip4Address) sockaddr_in_t {
+        const In = sockaddr_in_t;
         var sa: In = std.mem.zeroes(In);
         if (@hasField(In, "len")) sa.len = @sizeOf(In);
-        sa.family = std.posix.AF.INET;
+        sa.family = if (is_windows) winsock.AF_INET else std.posix.AF.INET;
         sa.port = std.mem.nativeToBig(u16, ip4.port);
         // sockaddr stores network-order bytes in memory; bytes are already
         // in network order, so a native-endian reinterpretation is correct.
@@ -103,25 +235,36 @@ pub const Conn = struct {
         return sa;
     }
 
-    fn connectSockaddr(io: std.Io, sa: *const std.posix.sockaddr.in) !Conn {
+    fn connectSockaddr(io: std.Io, sa: *const sockaddr_in_t) !Conn {
         const fd = try openStreamSocket();
         errdefer closeFd(fd);
-        // latency-sensitive protocol: TCP_NODELAY
-        std.posix.setsockopt(fd, std.posix.IPPROTO.TCP, 1, &std.mem.toBytes(@as(c_int, 1))) catch {};
+        setNoDelay(fd);
         // blocking connect (like the reference client's jnetlib), then go async
-        switch (std.posix.errno(std.posix.system.connect(fd, @ptrCast(sa), @sizeOf(std.posix.sockaddr.in)))) {
-            .SUCCESS, .INTR, .INPROGRESS => {},
-            .ISCONN => {},
-            else => |e| {
-                std.debug.print("connect errno: {any}\n", .{e});
-                return error.ConnectionRefused;
-            },
+        if (is_windows) {
+            if (winsock.connect(fd, sa, @sizeOf(sockaddr_in_t)) != 0) {
+                switch (winsock.WSAGetLastError()) {
+                    winsock.WSAEINTR, winsock.WSAEINPROGRESS, winsock.WSAEISCONN, winsock.WSAEWOULDBLOCK => {},
+                    else => |e| {
+                        std.debug.print("connect wsa errno: {d}\n", .{e});
+                        return error.ConnectionRefused;
+                    },
+                }
+            }
+        } else {
+            switch (std.posix.errno(std.posix.system.connect(fd, @ptrCast(sa), @sizeOf(sockaddr_in_t)))) {
+                .SUCCESS, .INTR, .INPROGRESS => {},
+                .ISCONN => {},
+                else => |e| {
+                    std.debug.print("connect errno: {any}\n", .{e});
+                    return error.ConnectionRefused;
+                },
+            }
         }
         setNonblocking(fd);
         return connected(io, fd);
     }
 
-    fn connected(io: std.Io, fd: std.posix.socket_t) Conn {
+    fn connected(io: std.Io, fd: sock_t) Conn {
         return .{
             .io = io,
             .fd = fd,
@@ -132,28 +275,60 @@ pub const Conn = struct {
 
     pub fn close(self: *Conn) void {
         closeFd(self.fd);
-        self.fd = -1;
+        self.fd = invalid_socket;
     }
 
     pub fn isConnected(self: *const Conn) bool {
-        return self.fd >= 0;
+        return self.fd != invalid_socket;
+    }
+
+    /// poll(2)/WSAPoll on one socket. Returns revents (0 on timeout).
+    fn waitSock(fd: sock_t, for_write: bool, timeout_ms: i32) Error!u32 {
+        if (is_windows) {
+            var fds = [_]winsock.pollfd{.{
+                .fd = fd,
+                .events = if (for_write) winsock.POLLOUT else winsock.POLLIN,
+                .revents = 0,
+            }};
+            const rc = winsock.WSAPoll(&fds, 1, timeout_ms);
+            if (rc == winsock.socket_error) return error.ConnectionClosed;
+            if (rc == 0) return 0;
+            return @intCast(@as(u32, @bitCast(@as(i32, fds[0].revents))));
+        }
+        var fds = [_]std.posix.pollfd{.{
+            .fd = fd,
+            .events = if (for_write) std.posix.POLL.OUT else std.posix.POLL.IN,
+            .revents = 0,
+        }};
+        const n = try std.posix.poll(&fds, timeout_ms);
+        if (n == 0) return 0;
+        return @intCast(@as(u32, @bitCast(@as(i32, fds[0].revents))));
+    }
+
+    /// recv into `buf`. 0 means orderly close; WouldBlock means no data.
+    fn readFd(fd: sock_t, buf: []u8) Error!usize {
+        if (is_windows) {
+            const rc = winsock.recv(fd, buf.ptr, @intCast(@min(buf.len, std.math.maxInt(c_int))), 0);
+            if (rc > 0) return @intCast(rc);
+            if (rc == 0) return 0;
+            return switch (winsock.WSAGetLastError()) {
+                winsock.WSAEWOULDBLOCK => error.WouldBlock,
+                winsock.WSAEINTR => error.WouldBlock,
+                else => error.ConnectionClosed,
+            };
+        }
+        return std.posix.read(fd, buf);
     }
 
     /// Wait until the socket is readable or timeout_ms elapses. Returns true
     /// if readable.
     pub fn pollReadable(self: *Conn, timeout_ms: i32) !bool {
-        if (self.fd < 0) return error.ConnectionClosed;
-        var fds = [_]std.posix.pollfd{.{
-            .fd = self.fd,
-            .events = std.posix.POLL.IN,
-            .revents = 0,
-        }};
-        const n = try std.posix.poll(&fds, timeout_ms);
-        return n > 0 and fds[0].revents != 0;
+        if (self.fd == invalid_socket) return error.ConnectionClosed;
+        return try waitSock(self.fd, false, timeout_ms) != 0;
     }
 
     fn fillMore(self: *Conn) Error!void {
-        if (self.fd < 0) return error.ConnectionClosed;
+        if (self.fd == invalid_socket) return error.ConnectionClosed;
         // compact if full
         if (self.rtail == self.rbuf.len) {
             if (self.rhead > 0) {
@@ -165,7 +340,7 @@ pub const Conn = struct {
                 return error.BadFrame; // >64KiB buffered and still no full frame
             }
         }
-        const n = std.posix.read(self.fd, self.rbuf[self.rtail..]) catch |e| switch (e) {
+        const n = readFd(self.fd, self.rbuf[self.rtail..]) catch |e| switch (e) {
             error.WouldBlock => return,
             else => return e,
         };
@@ -180,13 +355,8 @@ pub const Conn = struct {
             try self.fillMore();
             if (self.rtail - self.rhead == before) {
                 // no progress; wait for readability (bounded by poll timeout)
-                if (self.fd < 0) return error.ConnectionClosed;
-                var fds = [_]std.posix.pollfd{.{
-                    .fd = self.fd,
-                    .events = std.posix.POLL.IN,
-                    .revents = 0,
-                }};
-                _ = try std.posix.poll(&fds, 100);
+                if (self.fd == invalid_socket) return error.ConnectionClosed;
+                _ = try waitSock(self.fd, false, 100);
             }
         }
     }
@@ -208,20 +378,26 @@ pub const Conn = struct {
     }
 
     fn writeAllRaw(self: *Conn, data: []const u8) Error!void {
-        if (self.fd < 0) return error.ConnectionClosed;
+        if (self.fd == invalid_socket) return error.ConnectionClosed;
         var off: usize = 0;
         while (off < data.len) {
+            if (is_windows) {
+                const rc = winsock.send(self.fd, data[off..].ptr, @intCast(@min(data.len - off, std.math.maxInt(c_int))), 0);
+                if (rc > 0) {
+                    off += @intCast(rc);
+                    continue;
+                }
+                switch (winsock.WSAGetLastError()) {
+                    winsock.WSAEWOULDBLOCK => _ = try waitSock(self.fd, true, 1000),
+                    winsock.WSAEINTR => {},
+                    else => return error.ConnectionClosed,
+                }
+                continue;
+            }
             const rc = std.posix.system.write(self.fd, data[off..].ptr, data[off..].len);
             switch (std.posix.errno(rc)) {
                 .SUCCESS => off += @intCast(rc),
-                .AGAIN => {
-                    var fds = [_]std.posix.pollfd{.{
-                        .fd = self.fd,
-                        .events = std.posix.POLL.OUT,
-                        .revents = 0,
-                    }};
-                    _ = try std.posix.poll(&fds, 1000);
-                },
+                .AGAIN => _ = try waitSock(self.fd, true, 1000),
                 .INTR => {},
                 else => return error.ConnectionClosed,
             }

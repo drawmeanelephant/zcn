@@ -8,6 +8,7 @@
 //! session loop.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const build_options = @import("build_options");
 
 /// Compiled in? (build option `-Dlive`, default on when targeting macOS)
@@ -48,14 +49,43 @@ const capture_ring_seconds: f32 = 8.0;
 /// drops its head (60 bpm x 16 bpi is already 16 s; slower jams exist).
 const playback_ring_seconds: f32 = 30.0;
 
+/// Blocking lock for the audio rings: the audio thread must be able to block
+/// on the session thread, which a spinlock cannot do without burning its
+/// deadline. pthread mutex on POSIX, SRWLOCK on Windows (std has no portable
+/// mutex that works from a C callback thread without an Io).
+const RingMutex = if (builtin.os.tag == .windows) struct {
+    srw: std.os.windows.SRWLOCK = .{},
+
+    extern "kernel32" fn AcquireSRWLockExclusive(*std.os.windows.SRWLOCK) callconv(.winapi) void;
+    extern "kernel32" fn ReleaseSRWLockExclusive(*std.os.windows.SRWLOCK) callconv(.winapi) void;
+
+    fn lock(m: *RingMutex) void {
+        AcquireSRWLockExclusive(&m.srw);
+    }
+    fn unlock(m: *RingMutex) void {
+        ReleaseSRWLockExclusive(&m.srw);
+    }
+    fn deinit(_: *RingMutex) void {}
+} else struct {
+    inner: std.c.pthread_mutex_t = std.c.PTHREAD_MUTEX_INITIALIZER,
+
+    fn lock(m: *RingMutex) void {
+        _ = std.c.pthread_mutex_lock(&m.inner);
+    }
+    fn unlock(m: *RingMutex) void {
+        _ = std.c.pthread_mutex_unlock(&m.inner);
+    }
+    fn deinit(m: *RingMutex) void {
+        _ = std.c.pthread_mutex_destroy(&m.inner);
+    }
+};
+
 pub const Ring = struct {
     buf: []f32,
     read_pos: usize = 0,
     write_pos: usize = 0,
     count: usize = 0,
-    /// pthread mutex: the audio thread must be able to block on the session
-    /// thread, which a spinlock cannot do without burning its deadline.
-    mutex: std.c.pthread_mutex_t = std.c.PTHREAD_MUTEX_INITIALIZER,
+    mutex: RingMutex = .{},
     underruns: u64 = 0,
     overruns: u64 = 0,
 
@@ -64,16 +94,16 @@ pub const Ring = struct {
     }
 
     pub fn deinit(self: *Ring, alloc: std.mem.Allocator) void {
-        _ = std.c.pthread_mutex_destroy(&self.mutex);
+        self.mutex.deinit();
         alloc.free(self.buf);
     }
 
     fn lock(self: *Ring) void {
-        _ = std.c.pthread_mutex_lock(&self.mutex);
+        self.mutex.lock();
     }
 
     fn unlock(self: *Ring) void {
-        _ = std.c.pthread_mutex_unlock(&self.mutex);
+        self.mutex.unlock();
     }
 
     pub fn push(self: *Ring, data: []const f32) void {
