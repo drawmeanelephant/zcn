@@ -150,7 +150,7 @@ test "wav write/analyze roundtrip non-silence" {
     }
     try w.writeFloats(&samples);
     var tmp: [64]u8 = undefined;
-    const path = try std.fmt.bufPrint(&tmp, "/tmp/zclient-test-{d}.wav", .{std.c.getpid()});
+    const path = try std.fmt.bufPrint(&tmp, "/tmp/zcn-test-{d}.wav", .{std.c.getpid()});
     try w.open(path);
     try w.close();
     defer std.Io.Dir.cwd().deleteFile(io, path) catch {};

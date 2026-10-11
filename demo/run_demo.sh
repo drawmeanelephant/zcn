@@ -1,17 +1,24 @@
 #!/usr/bin/env bash
-# zclient end-to-end interop demo — no mocks, everything runs against the
-# UNMODIFIED reference ninjamsrv built from this repo's C++ sources.
+# zcn end-to-end interop demo — no mocks, everything runs against the
+# UNMODIFIED reference ninjamsrv built from a checkout of the C++ NINJAM
+# sources (this repo is Zig-only). Point NINJAM_REPO at that checkout --
+# a drawmeanelephant/ninjam clone has the CMake build the script drives;
+# upstream justinfrankel/ninjam does not ship one.
 #
-# Scenario 1 (acceptance 1+3): two zclient instances (registered user
+#   NINJAM_REPO=/path/to/ninjam ./demo/run_demo.sh
+#
+# Defaults to a sibling checkout at ../ninjam when unset.
+#
+# Scenario 1 (acceptance 1+3): two zcn instances (registered user
 #   "alice"/secret and anonymous "bob") exchange >=3 full intervals of audio
 #   and chat in both directions; all decoded audio is dumped to WAV and
 #   asserted non-silent (RMS >= 0.05), with a silence negative control.
-# Scenario 2 (acceptance 2): one zclient + tools/refpeer.cpp, a headless
+# Scenario 2 (acceptance 2): one zcn + tools/refpeer.cpp, a headless
 #   driver of the REFERENCE client core (ninjam/njclient.cpp, same as
-#   ninjam/tests/e2e_test.cpp). The reference client must decode zclient's
-#   upload (REFPEER RESULT ok=1) and zclient must decode the reference
+#   ninjam/tests/e2e_test.cpp). The reference client must decode zcn's
+#   upload (REFPEER RESULT ok=1) and zcn must decode the reference
 #   client's tone to a non-silent WAV.
-# Scenario 3 (Phase B live audio): zclient --live against the same reference
+# Scenario 3 (Phase B live audio): zcn --live against the same reference
 #   client core. The local device must really open, real microphone frames
 #   must reach the upload (and be decoded by the reference client), and the
 #   decoded peer mix must really reach the output ring -- measured on the
@@ -25,23 +32,26 @@
 #   audible channels, just time-shifted against each other).
 #
 # Evidence (transcripts, summaries, reports, WAV analysis, unit tests, server
-# log) is collected under zclient/demo/evidence/<timestamp>/.
+# log) is collected under demo/evidence/<timestamp>/.
 set -uo pipefail
 
-REPO=$(cd "$(dirname "$0")/../.." && pwd)
-ZDIR="$REPO/zclient"
+ZDIR=$(cd "$(dirname "$0")/.." && pwd)
+REPO=${NINJAM_REPO:-$(cd "$ZDIR/../ninjam" 2>/dev/null && pwd || true)}
+[ -n "$REPO" ] && [ -f "$REPO/CMakeLists.txt" ] || {
+  echo "DEMO FAIL: no NINJAM C++ checkout found -- set NINJAM_REPO to a" \
+       "drawmeanelephant/ninjam clone (needs the CMake build)."; exit 1; }
 SRVBUILD=${NINJAM_SRVBUILD:-/tmp/ninjam-srvbuild}
 COREBUILD=${NINJAM_COREBUILD:-/tmp/ninjam-fullbuild}
 PORT=${DEMO_PORT:-20491}
-RUNTIME=/tmp/zclient-demo
+RUNTIME=/tmp/zcn-demo
 EVDIR="$ZDIR/demo/evidence/$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$RUNTIME" "$EVDIR"
 
 fail() { echo "DEMO FAIL: $*"; exit 1; }
 
-echo "== building zclient (zig 0.17) =="
+echo "== building zcn (zig 0.17) =="
 ( cd "$ZDIR" && zig build -Doptimize=ReleaseSafe ) || fail "zig build"
-ZCLIENT="$ZDIR/zig-out/bin/zclient"
+ZCLIENT="$ZDIR/zig-out/bin/zcn"
 
 echo "== unit tests =="
 ( cd "$ZDIR" && zig build test --summary all ) > "$EVDIR/unit-tests.txt" 2>&1 || {
@@ -87,7 +97,7 @@ AnonymousUsers multi
 AnonymousUsersCanChat yes
 AnonymousMaskIP no
 User alice secret C
-DefaultTopic "zclient interop demo"
+DefaultTopic "zcn interop demo"
 DefaultBPM 100
 DefaultBPI 8
 SetKeepAlive 3
@@ -104,27 +114,27 @@ rm -rf "$DUMP1" "$DUMP2" "$DUMP3" "$DUMP4" "$DUMP5"
 cleanup() { kill $SRVPID 2>/dev/null; wait $SRVPID 2>/dev/null; }
 trap cleanup EXIT
 
-echo "== scenario 1: two zclients on real server =="
+echo "== scenario 1: two zcns on real server =="
 "$ZCLIENT" join --host 127.0.0.1:$PORT --user alice --pass secret \
-  --duration 26 --channel "zclient-alice" --source tone:440:0.5 \
-  --chat "hello from alice (zclient)" --chat-delay 2 \
+  --duration 26 --channel "zcn-alice" --source tone:440:0.5 \
+  --chat "hello from alice (zcn)" --chat-delay 2 \
   --out-dir "$DUMP1" --transcript "$EVDIR/s1-transcript-alice.log" \
   > "$EVDIR/s1-summary-alice.txt" 2>&1 &
 A=$!
 sleep 1.5
 "$ZCLIENT" join --host 127.0.0.1:$PORT --user anonymous:bob --pass x \
-  --duration 24 --channel "zclient-bob" --source tone:550:0.4 \
-  --chat "hello from bob (zclient anonymous)" --chat-delay 3 \
+  --duration 24 --channel "zcn-bob" --source tone:550:0.4 \
+  --chat "hello from bob (zcn anonymous)" --chat-delay 3 \
   --out-dir "$DUMP2" --transcript "$EVDIR/s1-transcript-bob.log" \
   > "$EVDIR/s1-summary-bob.txt" 2>&1 &
 B=$!
 wait $A $B
 
-echo "== scenario 2: zclient + reference client core =="
+echo "== scenario 2: zcn + reference client core =="
 "$ZCLIENT" join --host 127.0.0.1:$PORT --user alice --pass secret \
-  --duration 30 --channel "zclient-alice" --source tone:440:0.5 \
-  --out-dir "$DUMP3" --transcript "$EVDIR/s2-transcript-zclient.log" \
-  > "$EVDIR/s2-summary-zclient.txt" 2>&1 &
+  --duration 30 --channel "zcn-alice" --source tone:440:0.5 \
+  --out-dir "$DUMP3" --transcript "$EVDIR/s2-transcript-zcn.log" \
+  > "$EVDIR/s2-summary-zcn.txt" 2>&1 &
 Z=$!
 "$RUNTIME/refpeer" --host 127.0.0.1:$PORT --user anonymous:refpeer --pass x \
   --duration 28 --freq 660 --amp 0.4 --report "$EVDIR/s2-refpeer-report.txt" \
@@ -133,23 +143,23 @@ R=$?
 wait $Z
 [ "$R" -eq 0 ] || fail "scenario2: reference client driver exited $R (see $EVDIR/s2-refpeer-report.txt)"
 
-echo "== scenario 3: zclient --live (real device) + reference client core =="
+echo "== scenario 3: zcn --live (real device) + reference client core =="
 "$ZCLIENT" join --host 127.0.0.1:$PORT --user alice --pass secret \
-  --live --duration 26 --channel "zclient-live" \
-  --out-dir "$DUMP4" --transcript "$EVDIR/s3-transcript-zclient.log" \
+  --live --duration 26 --channel "zcn-live" \
+  --out-dir "$DUMP4" --transcript "$EVDIR/s3-transcript-zcn.log" \
   --play-wav "$EVDIR/s3-playback-mix.wav" \
-  > "$EVDIR/s3-summary-zclient.txt" 2>&1 &
+  > "$EVDIR/s3-summary-zcn.txt" 2>&1 &
 Z=$!
 "$RUNTIME/refpeer" --host 127.0.0.1:$PORT --user anonymous:refpeer --pass x \
   --duration 24 --freq 660 --amp 0.2 --report "$EVDIR/s3-refpeer-report.txt" \
   > "$EVDIR/s3-refpeer.log" 2>&1
 wait $Z
 
-echo "== scenario 4: zclient --live with two local channels =="
+echo "== scenario 4: zcn --live with two local channels =="
 "$ZCLIENT" join --host 127.0.0.1:$PORT --user alice --pass secret \
-  --live --duration 26 --channel "zclient-a" --channel "zclient-b" \
-  --out-dir "$DUMP5" --transcript "$EVDIR/s4-transcript-zclient.log" \
-  > "$EVDIR/s4-summary-zclient.txt" 2>&1 &
+  --live --duration 26 --channel "zcn-a" --channel "zcn-b" \
+  --out-dir "$DUMP5" --transcript "$EVDIR/s4-transcript-zcn.log" \
+  > "$EVDIR/s4-summary-zcn.txt" 2>&1 &
 Z=$!
 "$RUNTIME/refpeer" --host 127.0.0.1:$PORT --user anonymous:refpeer --pass x \
   --duration 24 --freq 660 --amp 0.2 --report "$EVDIR/s4-refpeer-report.txt" \
@@ -172,8 +182,8 @@ for side in alice bob; do
   CR=$(result_field chat_received "$S"); [ "$CR" -ge 2 ] || fail "scenario1 $side: chat_received=$CR <2"
   WAVS=$(result_field wav_count "$S"); [ "$WAVS" -ge 1 ] || fail "scenario1 $side: no wavs"
 done
-grep -q "hello from alice (zclient)" "$EVDIR/s1-transcript-bob.log" || fail "alice's chat never reached bob"
-grep -q "hello from bob (zclient anonymous)" "$EVDIR/s1-transcript-alice.log" || fail "bob's chat never reached alice"
+grep -q "hello from alice (zcn)" "$EVDIR/s1-transcript-bob.log" || fail "alice's chat never reached bob"
+grep -q "hello from bob (zcn anonymous)" "$EVDIR/s1-transcript-alice.log" || fail "bob's chat never reached alice"
 
 echo "== scenario 3: live audio (Phase B) — tone peer + --live client =="
 LIVE_OK=1
@@ -203,17 +213,17 @@ else
   echo "live scenario skipped (no audio device in this environment)"
 fi
 
-grep -q "REFPEER RESULT ok=1" "$EVDIR/s2-refpeer-report.txt" || fail "reference client did not decode zclient audio (see s2-refpeer-report.txt)"
-S2="$EVDIR/s2-summary-zclient.txt"
-[ "$(result_field ok "$S2")" = "true" ] || fail "scenario2 zclient not ok"
+grep -q "REFPEER RESULT ok=1" "$EVDIR/s2-refpeer-report.txt" || fail "reference client did not decode zcn audio (see s2-refpeer-report.txt)"
+S2="$EVDIR/s2-summary-zcn.txt"
+[ "$(result_field ok "$S2")" = "true" ] || fail "scenario2 zcn not ok"
 [ "$(result_field intervals_downloaded "$S2")" -ge 3 ] || fail "scenario2: downloaded <3"
 
 # Scenario 3 (live audio). Asserted on signal energy, not on "it ran".
-S3="$EVDIR/s3-summary-zclient.txt"
-[ "$(result_field ok "$S3")" = "true" ] || fail "scenario3 zclient not ok: $(cat "$S3")"
+S3="$EVDIR/s3-summary-zcn.txt"
+[ "$(result_field ok "$S3")" = "true" ] || fail "scenario3 zcn not ok: $(cat "$S3")"
 if [ "$(result_field live "$S3")" != "true" ]; then
   echo "SKIP scenario 3: no audio device available on this machine (see $S3)"
-  cp "$EVDIR/s3-transcript-zclient.log" "$EVDIR/s3-transcript-zclient-skipped.log" 2>/dev/null || true
+  cp "$EVDIR/s3-transcript-zcn.log" "$EVDIR/s3-transcript-zcn-skipped.log" 2>/dev/null || true
 else
   DEVNAME=$(result_field device "$S3" | tr -d '"')
   [ -n "$DEVNAME" ] && [ "$DEVNAME" != "device=" ] || fail "scenario3: no device name"
@@ -257,14 +267,14 @@ else
 
   # Scenario 4 (multi-channel live). Both channels must be transmitted and the
   # reference client must decode real audio on each of them.
-  S4="$EVDIR/s4-summary-zclient.txt"
-  [ "$(result_field ok "$S4")" = "true" ] || fail "scenario4 zclient not ok: $(cat "$S4")"
+  S4="$EVDIR/s4-summary-zcn.txt"
+  [ "$(result_field ok "$S4")" = "true" ] || fail "scenario4 zcn not ok: $(cat "$S4")"
   if [ "$(result_field live "$S4")" != "true" ]; then
     echo "SKIP scenario 4: no audio device available on this machine (see $S4)"
   else
     UC=$(result_field upload_channels "$S4"); [ "$UC" -eq 2 ] || fail "scenario4: upload_channels=$UC, expected 2"
     IU=$(result_field intervals_uploaded "$S4"); [ "$IU" -ge 3 ] || fail "scenario4: intervals_uploaded=$IU <3"
-    grep -q "0x82 SET_CHANNEL_INFO n=2" "$EVDIR/s4-transcript-zclient.log" || fail "scenario4: did not announce 2 channels"
+    grep -q "0x82 SET_CHANNEL_INFO n=2" "$EVDIR/s4-transcript-zcn.log" || fail "scenario4: did not announce 2 channels"
     NCH=$(grep -o "primary_channels=[0-9]*" "$EVDIR/s4-refpeer-report.txt" | head -1 | cut -d= -f2)
     [ "${NCH:-0}" -ge 2 ] || fail "scenario4: reference client sees $NCH channel(s), expected >=2"
     # every channel the reference client decoded must carry energy — when a
@@ -311,7 +321,7 @@ echo "== evidence -> $EVDIR (keep only the newest run under version control) =="
 # strip machine-specific absolute paths so the committed record is portable
 for f in "$EVDIR"/*.txt "$EVDIR"/*.log; do
   [ -e "$f" ] || continue
-  sed -e "s|$ZDIR/|zclient/|g" -e "s|$EVDIR/||g" -e "s|$RUNTIME/||g" "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+  sed -e "s|$ZDIR/|zcn/|g" -e "s|$EVDIR/||g" -e "s|$RUNTIME/||g" "$f" > "$f.tmp" && mv "$f.tmp" "$f"
 done
 cp "$EVDIR"/s1-summary-*.txt "$EVDIR"/s2-summary-*.txt "$EVDIR"/s3-summary-*.txt "$EVDIR"/s4-summary-*.txt \
    "$EVDIR"/s2-refpeer-report.txt "$EVDIR"/s3-refpeer-report.txt "$EVDIR"/s4-refpeer-report.txt "$EVDIR/" 2>/dev/null || true

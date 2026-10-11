@@ -8,7 +8,7 @@ const c_flags = [_][]const u8{
     // Keep miniaudio on its portable backends only: no ALSA/Pulse/JACK headers
     // needed, so the Linux static cross-build compiles anywhere. macOS uses
     // CoreAudio (frameworks linked below); other targets fall back to the null
-    // backend at runtime and zclient falls back to its synthetic source.
+    // backend at runtime and zcn falls back to its synthetic source.
     "-DMA_NO_ALSA",
     "-DMA_NO_PULSEAUDIO",
     "-DMA_NO_JACK",
@@ -60,6 +60,12 @@ fn addVendored(mod: *std.Build.Module, target: std.Build.ResolvedTarget) void {
         inline for (.{ "pthread", "m", "dl" }) |lib| {
             mod.linkSystemLibrary(lib, .{});
         }
+    } else if (target.result.os.tag == .windows) {
+        // miniaudio's Windows backends (WASAPI, DirectSound, WinMM): the header
+        // carries no pragma-comment libs, so name the import libraries here.
+        inline for (.{ "winmm", "dsound", "dxguid", "ole32", "avrt", "ksuser", "uuid" }) |lib| {
+            mod.linkSystemLibrary(lib, .{});
+        }
     }
 }
 
@@ -107,13 +113,13 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     addVendored(exe_mod, target);
-    const exe = b.addExecutable(.{ .name = "zclient", .root_module = exe_mod });
+    const exe = b.addExecutable(.{ .name = "zcn", .root_module = exe_mod });
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
     run_cmd.addPassthruArgs();
-    const run_step = b.step("run", "Run zclient");
+    const run_step = b.step("run", "Run zcn");
     run_step.dependOn(&run_cmd.step);
 
     const test_mod = b.createModule(.{
@@ -122,7 +128,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     addVendored(test_mod, target);
-    const unit_tests = b.addTest(.{ .name = "zclient-tests", .root_module = test_mod });
+    const unit_tests = b.addTest(.{ .name = "zcn-tests", .root_module = test_mod });
     const run_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);

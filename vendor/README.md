@@ -12,7 +12,7 @@ ecosystem. Each dependency is either a single file or a source-only tree.
 | `miniaudio_impl.c` | this repository | — | same as miniaudio | the single C TU that compiles the header, behind a small shim |
 
 `libvorbis` is 1.3.7 rather than 1.3.6 because that is what this repository's
-own CMake `FetchContent` pulls in for the reference client, so zclient and the
+own CMake `FetchContent` pulls in for the reference client, so zcn and the
 reference client link the same encoder.
 
 ## Local deltas
@@ -51,7 +51,7 @@ downstream, where the decoder runs in caller-buffer mode.
 ## What was trimmed
 
 The Xiph trees ship as autotools/CMake/MSVC tarballs: ~329k lines of which
-about 65k are C sources and headers. zclient compiles 25 files from those trees
+about 65k are C sources and headers. zcn compiles 25 files from those trees
 via `build.zig`, so the trees were reduced to exactly what the build needs and
 nothing else:
 

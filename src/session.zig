@@ -24,10 +24,10 @@ pub const Source = union(enum) {
 pub const Options = struct {
     host: []const u8 = "127.0.0.1",
     port: u16 = 2049,
-    user: []const u8 = "anonymous:zclient",
+    user: []const u8 = "anonymous:zcn",
     pass: []const u8 = "",
     srate: u32 = 48000,
-    channel_names: []const []const u8 = &.{"zclient"},
+    channel_names: []const []const u8 = &.{"zcn"},
     source: Source = .{ .tone = .{ .freq = 440.0, .amp = 0.5 } },
     out_dir: []const u8 = "dump",
     transcript_path: ?[]const u8 = null,

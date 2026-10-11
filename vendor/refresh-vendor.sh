@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Reproduce zclient/vendor/ exactly: pinned downloads, SHA-256 verification,
+# Reproduce vendor/ exactly: pinned downloads, SHA-256 verification,
 # and the trim rule documented in vendor/README.md.
 #
 #   ./vendor/refresh-vendor.sh            # rewrite vendor/ in place
@@ -42,7 +42,7 @@ STB_SHA=4c7cb2ff1f7011e9d67950446b7eb9ca044f2e464d76bfbb0b84dd2e23e65636
 STB_URL=https://raw.githubusercontent.com/nothings/stb/$STB_COMMIT/stb_vorbis.c
 
 # The trim rule. Everything not listed is dropped: build systems, docs, tests,
-# platform ports and IDE projects are not compiled by zclient's build.zig.
+# platform ports and IDE projects are not compiled by the zcn build.zig.
 KEEP_DOCS=(AUTHORS CHANGES COPYING README.md)
 KEEP_SUFFIXES=(.c .h)
 

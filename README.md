@@ -1,10 +1,16 @@
-# zclient — a NINJAM client in Zig
+# zcn — a NINJAM client in Zig
 
 A from-scratch NINJAM client that speaks the frozen wire protocol to an
-**unmodified** reference `ninjamsrv`, with real live audio in and out. Nothing
-under `ninjam/` is touched; the protocol is implemented from
-[`docs/PROTOCOL.md`](../docs/PROTOCOL.md) with the C++ client as ground truth
-where the spec is ambiguous.
+**unmodified** reference `ninjamsrv`, with real live audio in and out. The
+protocol is implemented from [`docs/PROTOCOL.md`](docs/PROTOCOL.md) with the
+C++ client as ground truth where the spec is ambiguous.
+
+This project began life as `zclient/` inside
+[drawmeanelephant/ninjam](https://github.com/drawmeanelephant/ninjam) and was
+extracted with its git history intact. It contains no NINJAM C++ code: the
+Zig sources here are a clean-room implementation of the wire protocol, and
+the vendored dependencies keep their own licenses (see
+[`vendor/README.md`](vendor/README.md)).
 
 * Zig 0.17.0, no package manager, no ecosystems.
 * Vendored dependencies, source only: `stb_vorbis.c` (decode),
@@ -25,8 +31,7 @@ Both phases are exercised by `demo/run_demo.sh` against a real server; see
 ## Build
 
 ```sh
-cd zclient
-zig build -Doptimize=ReleaseSafe      # -> zig-out/bin/zclient
+zig build -Doptimize=ReleaseSafe      # -> zig-out/bin/zcn
 zig build test                         # unit tests (protocol, vorbis, wav, rings)
 ```
 
@@ -50,15 +55,15 @@ zig build -Dtarget=aarch64-linux-musl -Doptimize=ReleaseSafe -Dlive=false
 
 ```sh
 # join a session with a synthetic source (Phase A)
-zig-out/bin/zclient join --host 127.0.0.1:2049 --user alice --pass secret \
+zig-out/bin/zcn join --host 127.0.0.1:2049 --user alice --pass secret \
   --source tone:440:0.5 --duration 30 --out-dir dump --chat "hello"
 
 # join with the real microphone and speakers (Phase B)
-zig-out/bin/zclient join --host 127.0.0.1:2049 --user alice --pass secret \
+zig-out/bin/zcn join --host 127.0.0.1:2049 --user alice --pass secret \
   --live --duration 30 --out-dir dump --play-wav playback-mix.wav
 
 # energy-check a WAV; exits non-zero on silence
-zig-out/bin/zclient check-wav playback-mix.wav --min-rms 0.05
+zig-out/bin/zcn check-wav playback-mix.wav --min-rms 0.05
 ```
 
 `--help` lists everything. The client prints one machine-readable `RESULT`
@@ -90,8 +95,8 @@ What that means for ongoing cost:
 | --- | --- | --- |
 | `src/` (Zig, ~3.5k lines) | low | Only changes if the protocol changes. Zig 0.17 churn is the main risk; it is pinned and CI would show it. |
 | `vendor/` | very low | Fully reproducible. `vendor/refresh-vendor.sh --check` (run in CI) proves the tree still matches the pinned upstream downloads. Bumping a dependency is editing two lines in that script and rerunning it. |
-| `demo/run_demo.sh` | low, opt-in | Needs cmake, a C++ toolchain and network on first run (the reference client's ogg/vorbis come via `FetchContent`). It is not run in CI and is not a gate. |
-| `tools/refpeer.cpp` | low | Links the in-tree `libninjam_core.a` / `libninjam_net.a`, so it tracks this repo's CMake targets. If those targets move, this file is the thing to fix — and nothing else depends on it. |
+| `demo/run_demo.sh` | low, opt-in | Needs a NINJAM C++ checkout (`NINJAM_REPO`, defaulting to a sibling `../ninjam`), cmake, a C++ toolchain and network on first run (the reference client's ogg/vorbis come via `FetchContent`). It is not run in CI and is not a gate. |
+| `tools/refpeer.cpp` | low | Links `libninjam_core.a` / `libninjam_net.a` from that checkout's CMake build, so it tracks the ninjam repo's targets. If those targets move, this file is the thing to fix — and nothing else depends on it. |
 
 What is explicitly *not* maintained: multi-device input, per-channel sources,
 Linux live audio (miniaudio is compiled with its ALSA/PulseAudio/JACK backends
@@ -108,20 +113,16 @@ Things that will break it, and what to do:
 * **A server behaviour change.** `demo/run_demo.sh` should fail, with the
   transcript showing where.
 
-Nothing here is on the critical path for the server or the reference client.
-The worst case if it bit-rotted is that CI goes red on a directory nobody
-depends on.
-
 ## Continuous integration
 
-`.github/workflows/ci.yml` has a `zclient` job alongside the C++ matrix: it
-verifies the vendored sources against their upstream pins, installs Zig 0.17.0,
-runs `zig build test`, builds the release binary, smoke-tests it against a
-committed evidence WAV, and on Linux cross-builds a static musl binary and
-asserts it is statically linked. macOS exercises live audio (miniaudio +
-Core Audio); Linux builds default to `-Dlive=false`, which leaves the device
-unused at runtime. No ALSA/PulseAudio/JACK headers are needed anywhere,
-because those miniaudio backends are compiled out (`build.zig`).
+`.github/workflows/ci.yml` verifies the vendored sources against their
+upstream pins, installs Zig 0.17.0, runs `zig build test`, builds the release
+binary and smoke-tests it against a committed evidence WAV — on macOS, Linux
+and Windows. Linux additionally cross-builds a static musl binary and asserts
+it is statically linked. macOS exercises live audio (miniaudio + Core Audio);
+other platforms default to `-Dlive=false`, which leaves the device unused at
+runtime. No ALSA/PulseAudio/JACK headers are needed anywhere, because those
+miniaudio backends are compiled out (`build.zig`).
 
 ## Layout
 
@@ -136,6 +137,7 @@ src/
   vorbis.zig    stb_vorbis decode, libvorbis encode
   wav.zig       WAV writer + RMS/peak analysis
   log.zig       transcript writer
+docs/PROTOCOL.md  the wire spec this implements (written against the C++ tree)
 vendor/
   miniaudio.h + miniaudio_impl.c   live device (one C TU behind a small shim)
   stb_vorbis.c                     Vorbis decoder
@@ -186,11 +188,11 @@ writes transcripts, summaries, unit-test output, WAV analysis and the server log
 to `demo/evidence/<timestamp>/`. It asserts signal energy everywhere and keeps
 a silence negative control, so a run that passes on silence cannot pass.
 
-1. **Two zclients** on a real server: mutual auth, >=3 full intervals each way,
-   chat sent *and* received, every decoded WAV above an RMS floor.
+1. **Two zcn instances** on a real server: mutual auth, >=3 full intervals each
+   way, chat sent *and* received, every decoded WAV above an RMS floor.
 2. **Interop with the reference client core** (`tools/refpeer.cpp`, built from
-   this repo's own `ninjam/njclient.cpp`): audio flows both directions, and the
-   reference side asserts the energy it decoded.
+   the ninjam checkout's `ninjam/njclient.cpp`): audio flows both directions,
+   and the reference side asserts the energy it decoded.
 3. **Live audio**: a real Core Audio device opens, real microphone frames reach
    the upload (the reference client decodes them), and the decoded peer mix
    reaches the output ring — mirrored to `--play-wav` and energy-checked.
@@ -199,7 +201,7 @@ a silence negative control, so a run that passes on silence cannot pass.
    end-to-end check that they stay aligned rather than drifting apart.
 
 ```sh
-bash demo/run_demo.sh
+NINJAM_REPO=/path/to/ninjam bash demo/run_demo.sh
 ```
 
 Each run writes a timestamped directory; only the newest one is kept under
@@ -216,3 +218,10 @@ recordings in the repo.
 * Live output is a mono sum of every subscribed peer, like the reference
   client; there is no per-peer gain.
 * Live audio is verified on macOS/Core Audio only.
+
+## License
+
+MIT for the code in this repository (`LICENSE`). Vendored dependencies keep
+their own licenses — `libogg`/`libvorbis` are BSD-3-Clause, `stb_vorbis` is
+public domain/MIT, `miniaudio` is public domain/MIT-0; see
+[`vendor/README.md`](vendor/README.md) and each file's header.

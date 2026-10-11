@@ -1,8 +1,8 @@
-//! zclient — from-scratch NINJAM client (see docs/PROTOCOL.md).
+//! zcn — from-scratch NINJAM client (see docs/PROTOCOL.md).
 //!
 //! Commands:
-//!   zclient join --host 127.0.0.1:2049 --user alice --pass secret [options]
-//!   zclient check-wav <file.wav> [--min-rms 0.001]
+//!   zcn join --host 127.0.0.1:2049 --user alice --pass secret [options]
+//!   zcn check-wav <file.wav> [--min-rms 0.001]
 
 const std = @import("std");
 const session = @import("session.zig");
@@ -11,7 +11,7 @@ const wavmod = @import("wav.zig");
 fn printUsage(io: std.Io) void {
     const usage =
         \\usage:
-        \\  zclient join --host 127.0.0.1[:port] --user NAME --pass PASS [options]
+        \\  zcn join --host 127.0.0.1[:port] --user NAME --pass PASS [options]
         \\    --srate N          engine sample rate (default 48000)
         \\    --channel NAME     local channel name (repeatable)
         \\    --source tone:FREQ:AMP | silence    local audio source (default tone:440:0.5)
@@ -25,7 +25,7 @@ fn printUsage(io: std.Io) void {
         \\    --live-period N    device period in frames (default 480 = 10 ms)
         \\    --audio-device ID  miniaudio device id (default: system default)
         \\    --play-wav FILE    dump the post-mix signal handed to the device
-        \\  zclient check-wav FILE [--min-rms R]   analyze a WAV; exit 1 if rms < R
+        \\  zcn check-wav FILE [--min-rms R]   analyze a WAV; exit 1 if rms < R
         \\
     ;
     std.Io.File.stderr().writeStreamingAll(io, usage) catch {};
@@ -140,7 +140,7 @@ fn cmdJoin(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, argv: [
             fail(io, "unknown option '{s}'", .{a});
         }
     }
-    if (channels.items.len == 0) channels.append(gpa, "zclient") catch {};
+    if (channels.items.len == 0) channels.append(gpa, "zcn") catch {};
     opts.channel_names = channels.items;
     if (opts.transcript_path == null) {
         opts.transcript_path = try std.fmt.allocPrint(arena, "{s}/transcript.log", .{opts.out_dir});

@@ -171,7 +171,7 @@ pub const Encoder = struct {
         if (c.vorbis_encode_init_vbr(&self.vi, 1, srate, quality) != 0)
             return error.InitFailed;
         c.vorbis_comment_init(&self.vc);
-        c.vorbis_comment_add_tag(&self.vc, "ENCODER", "zclient");
+        c.vorbis_comment_add_tag(&self.vc, "ENCODER", "zcn");
         if (c.vorbis_analysis_init(&self.vd, &self.vi) != 0) return error.InitFailed;
         if (c.vorbis_block_init(&self.vd, &self.vb) != 0) return error.InitFailed;
         if (c.ogg_stream_init(&self.os, @intCast(serial & 0x7FFFFFFF)) != 0) return error.InitFailed;
@@ -288,7 +288,7 @@ test "vorbis encode -> decode roundtrip, non-silent" {
 
 // #63: a hostile server can flip one byte of an Ogg interval download and
 // abort the client (stb_vorbis's malloc-backed error path frees pointers it
-// never allocated). This is the auditor's minimised repro: 3889 deterministic
+// never allocated). This is the auditor's minimised repro: 3885 deterministic
 // bytes, one byte at offset 164 flipped 0x00 -> 0x80.
 test "a corrupted Ogg is refused, not freed twice" {
     const alloc = std.testing.allocator;
@@ -307,7 +307,7 @@ test "a corrupted Ogg is refused, not freed twice" {
     try enc.flush(&ogg);
     const bytes = try ogg.toOwnedSlice(alloc);
     defer alloc.free(bytes);
-    try testing.expectEqual(@as(usize, 3889), bytes.len);
+    try testing.expectEqual(@as(usize, 3885), bytes.len);
     bytes[164] = 0x80;
     // a refusal is the correct answer; a crash or a corrupted heap is not
     try testing.expectError(error.OpenFailed, decodeMemory(alloc, bytes));

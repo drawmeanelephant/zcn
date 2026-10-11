@@ -1,20 +1,23 @@
 /*
-    zclient/tools/refpeer.cpp
+    tools/refpeer.cpp
 
     Interop harness: drives the REFERENCE NINJAM client core (NJClient from
     ninjam/njclient.cpp) headlessly, exactly like ninjam/tests/e2e_test.cpp
     does. It joins a live ninjamsrv session, broadcasts a local tone, and
     measures the audio it decodes from its remote peers.
 
-    Purpose: prove two-way audio interop between zclient (Zig) and the
+    Purpose: prove two-way audio interop between zcn (Zig) and the
     unmodified reference client:
-      - refpeer receives zclient's uploaded Vorbis intervals and decodes them
+      - refpeer receives zcn's uploaded Vorbis intervals and decodes them
         through the reference client's own libvorbis path (rx energy + peak).
-      - zclient receives refpeer's tone and dumps it to WAV (verified there).
+      - zcn receives refpeer's tone and dumps it to WAV (verified there).
 
-    Build (from repo root):
-      clang++ -std=c++17 -O2 zclient/tools/refpeer.cpp \
-        -I. -Ibuild_deps/... \
+    Build: needs a checkout of the C++ NINJAM sources (this repo is Zig-only).
+    demo/run_demo.sh does this for you -- set NINJAM_REPO to a
+    drawmeanelephant/ninjam clone, whose CMake build produces
+    libninjam_core.a / libninjam_net.a. Roughly:
+      clang++ -std=c++17 -O2 tools/refpeer.cpp \
+        -I$NINJAM_REPO -I<ogg/vorbis includes> \
         libninjam_core.a libninjam_net.a <ogg/vorbis libs> -o refpeer
 
     Usage: refpeer --host 127.0.0.1:20491 --user anonymous:refpeer --pass x
