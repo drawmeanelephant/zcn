@@ -135,7 +135,7 @@ pub const Stats = struct {
 const max_users = 32;
 const max_downloads = 8;
 const max_outputs = 16;
-const max_local_channels = 4;
+pub const max_local_channels = 4;
 
 const encode_block_samples = 960; // 20 ms @ 48 kHz
 const chunk_flush_bytes = 2048; // coalesce encoded bytes into >=2KiB chunks
@@ -949,10 +949,24 @@ pub const Session = struct {
         const cfg = proto.parseConfig(payload) catch {
             return self.failSession("bad config change", .{});
         };
+        self.log.line("S>C 0x02 CONFIG bpm={d} bpi={d}", .{ cfg.bpm, cfg.bpi });
+        // #11: both fields are raw wire values, and a config change is the one
+        // place the client divides by one of them — bpm = 0 reached @divTrunc
+        // below and panicked, while bpi = 0 does not crash but zeroes the
+        // interval length so advanceAudio never produces again. Neither is a
+        // tempo the client can honour, so drop the frame and keep the last
+        // known-good timing; a later valid config can still retime.
+        //
+        // Checked BEFORE the assignments below: adopting bpm = 0 would leave a
+        // session that believes it is running at 0 bpm, which is exactly the
+        // state that made the panic reachable.
+        if (cfg.bpm == 0 or cfg.bpi == 0) {
+            self.log.line("ignoring config: bpm and bpi must both be non-zero", .{});
+            return;
+        }
         const changed = cfg.bpm != self.bpm or cfg.bpi != self.bpi;
         self.bpm = cfg.bpm;
         self.bpi = cfg.bpi;
-        self.log.line("S>C 0x02 CONFIG bpm={d} bpi={d}", .{ cfg.bpm, cfg.bpi });
 
         if (changed) {
             // finalize any in-flight interval cleanly, then adopt new timing
@@ -975,12 +989,24 @@ pub const Session = struct {
         proto.parseUserinfoRecords(payload, &sink) catch |e| {
             return self.dropMalformed(proto.MSG_USERINFO_CHANGE_NOTIFY, e, payload.len);
         };
-        self.log.line("S>C 0x03 USERINFO nrecords={d}", .{sink.count});
+        self.log.line("S>C 0x03 USERINFO nrecords={d} dropped={d}", .{ sink.count, sink.dropped });
         for (sink.items()) |rec| {
             self.log.line("  user={s} ch={d} active={d} name={s} flags=0x{X:0>2}", .{
                 rec.username, rec.channel_id, @intFromBool(rec.active), rec.channel_name, rec.flags,
             });
             if (!rec.active) continue;
+            // wire-hostile-audit delta (#12): channel_id is a raw wire byte
+            // and the shift below needs a u5, so ids >= 32 panicked on
+            // @intCast. A channel outside 0..31 cannot name a bit in the u32
+            // subscribe mask — the reference client's mask is u32 too — so the
+            // record has no legitimate meaning. Skipping (not failing the
+            // session) is right: one nonsense record from a quirky server
+            // should not tear down a live session, and the rest of the
+            // message is still good.
+            if (rec.channel_id >= 32) {
+                self.log.line("  ignoring userinfo record: channel {d} is out of range 0..31", .{rec.channel_id});
+                continue;
+            }
             const u = self.findOrAddUser(rec.username) orelse continue;
             const bit = @as(u32, 1) << @intCast(rec.channel_id);
             if (u.mask & bit == 0) {
@@ -1153,6 +1179,28 @@ test "multi-channel live capture shares one block per step (channels stay aligne
     try std.testing.expectEqual(shared[63], ba[63]);
 }
 
+test "config with bpm=0 or bpi=0 is ignored; later valid config still retimes" {
+    var s = try Session.init(std.testing.allocator, std.testing.io, .{});
+    defer s.deinit();
+
+    // #11: bpm/bpi are raw wire values — bpm=0 must never reach the
+    // @divTrunc(srate * bpi * 60, bpm) in onConfig, and bpi=0 must not zero
+    // the interval length either.
+    try s.onConfig(&[_]u8{ 0, 0, 8, 0 }); // bpm=0 bpi=8
+    try std.testing.expectEqual(@as(u64, 0), s.interval_len_samples);
+    try s.onConfig(&[_]u8{ 120, 0, 0, 0 }); // bpm=120 bpi=0
+    try std.testing.expectEqual(@as(u64, 0), s.interval_len_samples);
+    try s.onConfig(&[_]u8{ 0, 0, 0, 0 }); // bpm=0 bpi=0
+    try std.testing.expectEqual(@as(u64, 0), s.interval_len_samples);
+    try std.testing.expectEqual(@as(u16, 0), s.bpm);
+
+    // a valid config still retimes, and a subsequent one re-anchors again
+    try s.onConfig(&[_]u8{ 120, 0, 8, 0 }); // bpm=120 bpi=8
+    try std.testing.expectEqual(@as(u64, 48000 * 8 * 60 / 120), s.interval_len_samples);
+    try s.onConfig(&[_]u8{ 140, 0, 4, 0 }); // bpm=140 bpi=4
+    try std.testing.expectEqual(@as(u64, 48000 * 4 * 60 / 140), s.interval_len_samples);
+}
+
 test "synthetic sources keep an independent phase per channel" {
     var a = LocalChannel{ .pending = Buf.init(std.testing.allocator) };
     defer a.pending.deinit();
@@ -1207,6 +1255,62 @@ test "distinct usernames that sanitize alike get distinct WAV paths (#3)" {
         try std.fmt.bufPrint(&exp_d_buf, "{s}/a_b_1_1_ch0.wav", .{out_dir}),
         d.pathSlice(),
     );
+}
+
+test "userinfo records with channel_id >= 32 are skipped instead of shifted" {
+    var s = try Session.init(std.testing.allocator, std.testing.io, .{});
+    defer s.deinit();
+    s.log.quiet = true;
+
+    var f = Fixed{};
+    for ([_]u8{ 32, 40, 255 }) |ch| {
+        try proto.buildUserinfoRecord(.{
+            .active = true,
+            .channel_id = ch,
+            .volume = 0,
+            .pan = 0,
+            .flags = 0,
+            .username = "peer",
+            .channel_name = "boom",
+        }, &f);
+    }
+    try s.onUserinfo(f.slice());
+
+    // skipped before findOrAddUser: no user entry, no mask, no 0x81 reply
+    for (&s.users) |*u| try std.testing.expectEqual(@as(usize, 0), u.name_len);
+    try std.testing.expectEqual(@as(u64, 0), s.stats.msgs_sent);
+}
+
+test "userinfo channel ids 0-31 still drive the mask and the 0x81 reply" {
+    const builtin = @import("builtin");
+    if (builtin.os.tag == .windows) {
+        // needs a real fd for the auto-subscribe reply; no socketpair on win32
+        return error.SkipZigTest;
+    } else {
+        var s = try Session.init(std.testing.allocator, std.testing.io, .{});
+        defer s.deinit();
+        s.log.quiet = true;
+        var fds: [2]std.posix.socket_t = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds));
+        defer _ = std.posix.system.close(fds[1]);
+        s.conn = .{ .io = s.io, .fd = fds[0] };
+
+        var f = Fixed{};
+        try proto.buildUserinfoRecord(.{
+            .active = true,
+            .channel_id = 3,
+            .volume = 0,
+            .pan = 0,
+            .flags = 0,
+            .username = "peer",
+            .channel_name = "gtr",
+        }, &f);
+        try s.onUserinfo(f.slice());
+
+        const u = s.findOrAddUser("peer").?;
+        try std.testing.expectEqual(@as(u32, 1) << 3, u.mask);
+        try std.testing.expectEqual(@as(u64, 1), s.stats.msgs_sent);
+    }
 }
 
 test "malformed steady-state frames are dropped, session state unchanged (#16)" {

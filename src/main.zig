@@ -12,8 +12,8 @@ fn printUsage(io: std.Io) void {
     const usage =
         \\usage:
         \\  zcn join --host 127.0.0.1[:port] --user NAME --pass PASS [options]
-        \\    --srate N          engine sample rate (default 48000)
-        \\    --channel NAME     local channel name (repeatable)
+        \\    --srate N          engine sample rate 8000-192000 (default 48000)
+        \\    --channel NAME     local channel name (repeatable, max 4)
         \\    --source tone:FREQ:AMP | silence    local audio source (default tone:440:0.5)
         \\    --duration S       seconds to run (default 20)
         \\    --out-dir DIR      directory for decoded peer WAVs (default dump)
@@ -90,10 +90,14 @@ fn cmdJoin(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, argv: [
             opts.pass = next orelse fail(io, "--pass needs a value", .{});
             i += 1;
         } else if (std.mem.eql(u8, a, "--srate")) {
-            opts.srate = parseInto(u32, next orelse fail(io, "--srate needs a value", .{})) catch fail(io, "bad --srate", .{});
+            const v = parseInto(u32, next orelse fail(io, "--srate needs a value", .{})) catch fail(io, "bad --srate", .{});
+            if (v < 8000 or v > 192000) fail(io, "--srate must be in 8000..192000", .{});
+            opts.srate = v;
             i += 1;
         } else if (std.mem.eql(u8, a, "--channel")) {
             const v = next orelse fail(io, "--channel needs a value", .{});
+            if (channels.items.len >= session.max_local_channels)
+                fail(io, "too many --channel flags (max {d})", .{session.max_local_channels});
             channels.append(gpa, v) catch {};
             i += 1;
         } else if (std.mem.eql(u8, a, "--source")) {
@@ -138,6 +142,7 @@ fn cmdJoin(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, argv: [
             i += 1;
         } else if (std.mem.eql(u8, a, "--live-period")) {
             opts.live_period = parseInto(u32, next orelse fail(io, "--live-period needs a value", .{})) catch fail(io, "bad --live-period", .{});
+            i += 1;
         } else if (std.mem.eql(u8, a, "--audio-device")) {
             opts.live_device = next orelse fail(io, "--audio-device needs a value", .{});
             i += 1;
