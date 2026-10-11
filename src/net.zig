@@ -320,11 +320,27 @@ pub const Conn = struct {
         return std.posix.read(fd, buf);
     }
 
-    /// Wait until the socket is readable or timeout_ms elapses. Returns true
+    /// Wait until a message can be read or timeout_ms elapses. Returns true
     /// if readable.
     pub fn pollReadable(self: *Conn, timeout_ms: i32) !bool {
         if (self.fd == invalid_socket) return error.ConnectionClosed;
+        // readMessage consumes from rbuf, not the socket: when two frames
+        // arrive in one TCP segment the second stays fully buffered with
+        // nothing pending on the fd, so it must count as readable.
+        if (self.hasBufferedFrame()) return true;
         return try waitSock(self.fd, false, timeout_ms) != 0;
+    }
+
+    /// rbuf holds a complete frame, or a header readMessage will reject as
+    /// BadFrame. A partial frame is not reported: callers would enter
+    /// readMessage, which blocks in ensureBuffered until the rest arrives,
+    /// bypassing their timeout.
+    fn hasBufferedFrame(self: *const Conn) bool {
+        const live = self.rtail - self.rhead;
+        if (live < 5) return false;
+        const size = std.mem.readInt(u32, self.rbuf[self.rhead + 1 ..][0..4], .little);
+        if (self.rbuf[self.rhead] == 0xFF or size > max_payload) return true;
+        return live - 5 >= size;
     }
 
     fn fillMore(self: *Conn) Error!void {
@@ -417,4 +433,46 @@ pub const Conn = struct {
 
 test "framing constants" {
     try std.testing.expectEqual(@as(u32, 16384), max_payload);
+}
+
+test "pollReadable reports complete frames buffered in rbuf" {
+    if (is_windows) return error.SkipZigTest;
+    var sv: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.c.AF.UNIX, std.c.SOCK.STREAM, 0, &sv));
+    defer _ = std.c.close(sv[0]);
+    defer _ = std.c.close(sv[1]);
+
+    var conn: Conn = .{ .fd = sv[0] };
+
+    // empty rbuf, idle socket: not readable
+    try std.testing.expect(!(try conn.pollReadable(0)));
+
+    // frame left fully buffered behind consumed bytes (two frames coalesced
+    // in one TCP segment): readable even with nothing pending on the socket
+    conn.rhead = 7;
+    const fr = [_]u8{ 0x02, 4, 0, 0, 0, 0xaa, 0xbb, 0xcc, 0xdd };
+    @memcpy(conn.rbuf[conn.rhead..][0..fr.len], &fr);
+    conn.rtail = conn.rhead + fr.len;
+    try std.testing.expect(try conn.pollReadable(0));
+
+    // partial payload: not readable — readMessage would block in
+    // ensureBuffered waiting for the rest, so the socket stays the arbiter
+    conn.rtail = conn.rhead + fr.len - 1;
+    try std.testing.expect(!(try conn.pollReadable(0)));
+
+    // partial header: same
+    conn.rtail = conn.rhead + 3;
+    try std.testing.expect(!(try conn.pollReadable(0)));
+
+    // bad header readMessage will reject: readable so the error surfaces
+    // instead of stalling
+    std.mem.writeInt(u32, conn.rbuf[conn.rhead + 1 ..][0..4], max_payload + 1, .little);
+    conn.rtail = conn.rhead + 5;
+    try std.testing.expect(try conn.pollReadable(0));
+
+    // socket path with rbuf drained
+    conn.rhead = 0;
+    conn.rtail = 0;
+    _ = std.c.write(sv[1], &fr, fr.len);
+    try std.testing.expect(try conn.pollReadable(0));
 }
