@@ -1,0 +1,4 @@
+# LF everywhere: vendor/refresh-vendor.sh --check compares the checked-out
+# tree byte-for-byte against the pinned upstream downloads, and a CRLF
+# checkout on Windows makes every vendored file drift.
+* text=auto eol=lf
