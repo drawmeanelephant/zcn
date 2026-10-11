@@ -919,7 +919,7 @@ pub const Session = struct {
         proto.parseUserinfoRecords(payload, &sink) catch {
             return self.failSession("bad userinfo change", .{});
         };
-        self.log.line("S>C 0x03 USERINFO nrecords={d}", .{sink.count});
+        self.log.line("S>C 0x03 USERINFO nrecords={d} dropped={d}", .{ sink.count, sink.dropped });
         for (sink.items()) |rec| {
             self.log.line("  user={s} ch={d} active={d} name={s} flags=0x{X:0>2}", .{
                 rec.username, rec.channel_id, @intFromBool(rec.active), rec.channel_name, rec.flags,

@@ -119,7 +119,9 @@ pub const UserInfoRecord = struct {
     channel_name: []const u8,
 };
 
-/// Collect all records into `sink`.
+/// Collect all records into `sink`. Records past the sink's cap are dropped
+/// and counted, never fatal — a busy server's full roster must fit the wire
+/// (16384-byte payload) but need not fit our fixed table.
 pub fn parseUserinfoRecords(payload: []const u8, sink: *UserInfoSink) !void {
     var r = Reader.init(payload);
     while (r.remaining() > 0) {
@@ -132,7 +134,7 @@ pub fn parseUserinfoRecords(payload: []const u8, sink: *UserInfoSink) !void {
             .username = try r.readNulstr(),
             .channel_name = try r.readNulstr(),
         };
-        try sink.append(rec);
+        sink.append(rec);
     }
 }
 
@@ -140,9 +142,14 @@ pub const UserInfoSink = struct {
     const max_records = 64;
     records: [max_records]UserInfoRecord = undefined,
     count: usize = 0,
+    /// records that arrived after the sink filled; bounded input, bounded drop
+    dropped: usize = 0,
 
-    pub fn append(self: *UserInfoSink, rec: UserInfoRecord) !void {
-        if (self.count >= max_records) return error.OutOfMemory;
+    pub fn append(self: *UserInfoSink, rec: UserInfoRecord) void {
+        if (self.count >= max_records) {
+            self.dropped += 1;
+            return;
+        }
         self.records[self.count] = rec;
         self.count += 1;
     }
@@ -397,6 +404,37 @@ test "userinfo empty payload = empty list" {
     var sink = UserInfoSink{};
     try parseUserinfoRecords(&[_]u8{}, &sink);
     try testing.expectEqual(@as(usize, 0), sink.count);
+}
+
+test "userinfo records past the cap are dropped, not fatal (issue #15)" {
+    // A busy server can legitimately pack >64 records into one 16384-byte
+    // frame (33 users x 2 channels, or long names). The sink keeps the first
+    // max_records and counts the rest instead of erroring.
+    var f = Fixed{};
+    for (0..70) |i| {
+        var name: [16]u8 = undefined;
+        try buildUserinfoRecord(.{
+            .active = true,
+            .channel_id = @intCast(i % 2),
+            .volume = 0,
+            .pan = 0,
+            .flags = 0,
+            .username = std.fmt.bufPrint(&name, "user{d}", .{i}) catch unreachable,
+            .channel_name = "c",
+        }, &f);
+    }
+    var sink = UserInfoSink{};
+    try parseUserinfoRecords(f.slice(), &sink);
+    try testing.expectEqual(@as(usize, UserInfoSink.max_records), sink.count);
+    try testing.expectEqual(@as(usize, 70 - UserInfoSink.max_records), sink.dropped);
+    try testing.expectEqualStrings("user63", sink.records[63].username);
+}
+
+test "userinfo truncated mid-record still errors" {
+    // six fixed bytes then a username with no NUL terminator
+    const payload = [_]u8{ 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 'b', 'o', 'b' };
+    var sink = UserInfoSink{};
+    try testing.expectError(error.Truncated, parseUserinfoRecords(&payload, &sink));
 }
 
 test "interval begin with username (spec §10.4)" {
