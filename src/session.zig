@@ -373,17 +373,38 @@ pub const Session = struct {
                 o.writer = wavmod.WavWriter.init(self.alloc, self.io, srate, 1);
                 var tmp: [256]u8 = undefined;
                 const nb = sanitizeName(&tmp, username);
-                const path = std.fmt.bufPrint(&o.path, "{s}/{s}_ch{d}.wav", .{ self.opts.out_dir, tmp[0..nb], chidx }) catch {
-                    o.active = false;
-                    return error.OutOfMemory;
-                };
-                o.path_len = path.len;
+                // #3: distinct wire usernames can sanitize alike ("a b" vs
+                // "a_b"), so a candidate path is only final once no other open
+                // output already holds it — collisions take a numeric suffix.
+                var attempt: u32 = 0;
+                while (true) : (attempt += 1) {
+                    const path = (if (attempt == 0)
+                        std.fmt.bufPrint(&o.path, "{s}/{s}_ch{d}.wav", .{ self.opts.out_dir, tmp[0..nb], chidx })
+                    else
+                        std.fmt.bufPrint(&o.path, "{s}/{s}_{d}_ch{d}.wav", .{ self.opts.out_dir, tmp[0..nb], attempt, chidx })) catch {
+                        o.active = false;
+                        return error.OutOfMemory;
+                    };
+                    o.path_len = path.len;
+                    if (!self.outputPathInUse(o)) break;
+                }
                 try o.writer.open(o.pathSlice());
                 self.log.line("wav open {s} (srate={d})", .{ o.pathSlice(), srate });
                 return o;
             }
         }
         return error.NoSlot;
+    }
+
+    /// #3: is `slot`'s dump path already claimed by another open output?
+    /// Two peers whose usernames sanitize alike must not truncate or
+    /// interleave each other's WAV.
+    fn outputPathInUse(self: *Session, slot: *const OutputFile) bool {
+        for (&self.outputs) |*other| {
+            if (other == slot or !other.active) continue;
+            if (std.mem.eql(u8, other.pathSlice(), slot.pathSlice())) return true;
+        }
+        return false;
     }
 
     pub fn closeWavs(self: *Session) void {
@@ -1112,4 +1133,43 @@ test "synthetic sources keep an independent phase per channel" {
     try std.testing.expect(ba[0] != bb[0]);
     // each channel still advances its own oscillator
     try std.testing.expect(a.phase != b.phase);
+}
+
+test "distinct usernames that sanitize alike get distinct WAV paths (#3)" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var td = std.testing.tmpDir(.{});
+    defer td.cleanup();
+    // std.testing.tmpDir makes .zig-cache/tmp/<sub_path> relative to cwd
+    var dirbuf: [256]u8 = undefined;
+    const out_dir = try std.fmt.bufPrint(&dirbuf, ".zig-cache/tmp/{s}", .{&td.sub_path});
+    var s = try Session.init(alloc, io, .{ .out_dir = out_dir });
+    defer s.deinit();
+    s.log.quiet = true;
+
+    const a = try s.findOrOpenOutput("a b", 0, 44100);
+    const b = try s.findOrOpenOutput("a_b", 0, 44100);
+    const c = try s.findOrOpenOutput("carol", 0, 44100);
+    try std.testing.expect(!std.mem.eql(u8, a.user.nameSlice(), b.user.nameSlice()));
+    try std.testing.expect(!std.mem.eql(u8, a.pathSlice(), b.pathSlice()));
+    // non-colliding names keep the unsuffixed {name}_ch{idx}.wav naming
+    var exp_a_buf: [320]u8 = undefined;
+    var exp_c_buf: [320]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        try std.fmt.bufPrint(&exp_a_buf, "{s}/a_b_ch0.wav", .{out_dir}),
+        a.pathSlice(),
+    );
+    try std.testing.expectEqualStrings(
+        try std.fmt.bufPrint(&exp_c_buf, "{s}/carol_ch0.wav", .{out_dir}),
+        c.pathSlice(),
+    );
+    // the generated suffix cannot alias a literal sanitized name either:
+    // "a b 1" sanitizes to a_b_1, whose unsuffixed path is already taken
+    const d = try s.findOrOpenOutput("a b 1", 0, 44100);
+    try std.testing.expect(!std.mem.eql(u8, b.pathSlice(), d.pathSlice()));
+    var exp_d_buf: [320]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        try std.fmt.bufPrint(&exp_d_buf, "{s}/a_b_1_1_ch0.wav", .{out_dir}),
+        d.pathSlice(),
+    );
 }
