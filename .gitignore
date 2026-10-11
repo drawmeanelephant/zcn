@@ -4,3 +4,4 @@ zig-out-*/
 demo/work/
 dump/
 *.log
+.DS_Store
