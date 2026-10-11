@@ -531,7 +531,17 @@ pub const Session = struct {
         }
         self.stats.playback_frames += mono.len;
         d.writePlayback(mono);
-        if (self.play_wav_active) self.play_writer.writeFloats(mono) catch {};
+        if (self.play_wav_active) {
+            // #2: same RIFF cap as the peer dumps — warn once if the
+            // playback mirror starts dropping audio at the limit.
+            const was_truncated = self.play_writer.truncated;
+            self.play_writer.writeFloats(mono) catch {};
+            if (self.play_writer.truncated and !was_truncated) {
+                self.log.line("playback wav: hit the {d}-byte RIFF limit — further audio is dropped", .{
+                    wavmod.WavWriter.max_pcm_bytes,
+                });
+            }
+        }
     }
 
     // ---- connection ----------------------------------------------------------
@@ -829,7 +839,15 @@ pub const Session = struct {
                 d.buf.clear();
                 return;
             };
+            const was_truncated = out.writer.truncated;
             try out.writer.writeFloats(mono);
+            // #2: the writer caps buffered PCM at the RIFF u32 limit; warn
+            // once when a dump starts dropping audio instead of growing forever.
+            if (out.writer.truncated and !was_truncated) {
+                self.log.line("wav {s}: hit the {d}-byte RIFF limit — further decoded audio for this peer is dropped", .{
+                    out.pathSlice(), wavmod.WavWriter.max_pcm_bytes,
+                });
+            }
             self.pushPlayback(mono);
         }
         d.active = false;
