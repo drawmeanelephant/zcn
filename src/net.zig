@@ -208,7 +208,12 @@ pub const Conn = struct {
             return;
         }
         const flags = std.c.fcntl(fd, std.c.F.GETFL, @as(c_int, 0));
-        _ = std.c.fcntl(fd, std.c.F.SETFL, flags | 0o4000);
+        // O_NONBLOCK's bit position is not portable (Linux 0o4000, Darwin
+        // 0o4, *BSD others): a hardcoded Linux literal silently leaves the
+        // socket blocking on macOS, which makes read() hang the session
+        // (#13). Take the bit from the target's std.c.O layout instead.
+        const nonblock: c_int = @intCast(@as(u32, @bitCast(std.c.O{ .NONBLOCK = true })));
+        _ = std.c.fcntl(fd, std.c.F.SETFL, flags | nonblock);
     }
 
     fn setNoDelay(fd: sock_t) void {
@@ -370,9 +375,13 @@ pub const Conn = struct {
             const before = self.rtail - self.rhead;
             try self.fillMore();
             if (self.rtail - self.rhead == before) {
-                // no progress; wait for readability (bounded by poll timeout)
-                if (self.fd == invalid_socket) return error.ConnectionClosed;
-                _ = try waitSock(self.fd, false, 100);
+                // #13: a partial inbound frame must not pin the session loop —
+                // while blocked here neither the --duration deadline nor the
+                // stall watchdog can run, and keepalives stop. Keep the bytes
+                // buffered and hand control back; the run loop retries on the
+                // next readable pass, and a frame that never completes dies to
+                // the last_recv_ms watchdog instead of hanging forever.
+                return error.WouldBlock;
             }
         }
     }
