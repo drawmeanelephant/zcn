@@ -85,6 +85,10 @@ pub const Stats = struct {
     /// download_timeout_ms without a final write, or for decoding past the
     /// decoded-sample ceiling
     downloads_aborted: u64 = 0,
+    /// steady-state frames dropped for failing payload parse (#16): a
+    /// malformed payload never desyncs the stream — framing already consumed
+    /// the declared length — so these are logged and skipped, not fatal
+    frames_dropped: u64 = 0,
     samples_decoded: u64 = 0,
 
     chat_sent: u64 = 0,
@@ -326,6 +330,19 @@ pub const Session = struct {
         self.log.line("FAIL: " ++ fmt, args);
         self.state = .done;
         return error.SessionFailed;
+    }
+
+    /// #16: drop a steady-state frame whose payload failed to parse. Safe
+    /// because readMessage already consumed the header-declared length — the
+    /// next frame starts on a clean boundary no matter what the payload held.
+    /// Errors that DO break framing (net.zig's error.BadFrame: type 0xFF or
+    /// declared size > max_payload, plus socket/EOF failures) still fail the
+    /// session in run(); there is no resync primitive for an untrusted length.
+    fn dropMalformed(self: *Session, mtype: u8, e: anyerror, size: usize) void {
+        self.stats.frames_dropped += 1;
+        self.log.line("S>C 0x{X:0>2} {s} malformed: {s} size={d} (dropped)", .{
+            mtype, proto.type_name(mtype), @errorName(e), size,
+        });
     }
 
     fn findOrAddUser(self: *Session, name: []const u8) ?*UserEntry {
@@ -980,8 +997,8 @@ pub const Session = struct {
 
     fn onUserinfo(self: *Session, payload: []const u8) !void {
         var sink = proto.UserInfoSink{};
-        proto.parseUserinfoRecords(payload, &sink) catch {
-            return self.failSession("bad userinfo change", .{});
+        proto.parseUserinfoRecords(payload, &sink) catch |e| {
+            return self.dropMalformed(proto.MSG_USERINFO_CHANGE_NOTIFY, e, payload.len);
         };
         self.log.line("S>C 0x03 USERINFO nrecords={d} dropped={d}", .{ sink.count, sink.dropped });
         for (sink.items()) |rec| {
@@ -1015,8 +1032,8 @@ pub const Session = struct {
     }
 
     fn onDownloadBegin(self: *Session, payload: []const u8) !void {
-        const b = proto.parseIntervalBegin(payload) catch {
-            return self.failSession("bad download begin", .{});
+        const b = proto.parseIntervalBegin(payload) catch |e| {
+            return self.dropMalformed(proto.MSG_DOWNLOAD_INTERVAL_BEGIN, e, payload.len);
         };
         if (proto.isZeroGuid(&b.guid) and b.fourcc == 0) {
             self.log.line("S>C 0x04 SILENCE_MARKER user={s} ch={d}", .{ b.username, b.chidx });
@@ -1034,8 +1051,8 @@ pub const Session = struct {
     }
 
     fn onDownloadWrite(self: *Session, payload: []const u8) !void {
-        const w = proto.parseIntervalWrite(payload) catch {
-            return self.failSession("bad download write", .{});
+        const w = proto.parseIntervalWrite(payload) catch |e| {
+            return self.dropMalformed(proto.MSG_DOWNLOAD_INTERVAL_WRITE, e, payload.len);
         };
         const d = self.findDownload(&w.guid) orelse {
             self.log.line("S>C 0x05 WRITE for unknown guid (ignored)", .{});
@@ -1065,8 +1082,8 @@ pub const Session = struct {
     }
 
     fn onChat(self: *Session, payload: []const u8) !void {
-        const p = proto.parseChat(payload) catch {
-            return self.failSession("bad chat message", .{});
+        const p = proto.parseChat(payload) catch |e| {
+            return self.dropMalformed(proto.MSG_CHAT_MESSAGE, e, payload.len);
         };
         self.stats.chat_received += 1;
         self.log.line("S>C 0xC0 CHAT {s}: {s} | {s} | {s} | {s}", .{
@@ -1305,4 +1322,42 @@ test "userinfo channel ids 0-31 still drive the mask and the 0x81 reply" {
         try std.testing.expectEqual(@as(u32, 1) << 3, u.mask);
         try std.testing.expectEqual(@as(u64, 1), s.stats.msgs_sent);
     }
+}
+
+test "malformed steady-state frames are dropped, session state unchanged (#16)" {
+    var sess = try Session.init(std.testing.allocator, std.testing.io, .{});
+    defer sess.deinit();
+    sess.state = .active;
+
+    // chat parm without its NUL terminator; download begin <25B; download
+    // write <17B; userinfo record cut before its NULs — all dropped
+    try sess.onChat("MSG\x00alice\x00unterminated-no-nul");
+    try sess.onDownloadBegin(&@as([24]u8, @splat(0x42)));
+    try sess.onDownloadWrite(&@as([16]u8, @splat(0x42)));
+    try sess.onUserinfo("\x01\x00record-without-terminators");
+    try std.testing.expectEqual(@as(u64, 4), sess.stats.frames_dropped);
+    try std.testing.expectEqual(@as(u64, 0), sess.stats.chat_received);
+
+    // framing is untouched: a well-formed frame right after still dispatches
+    try sess.onChat("MSG\x00alice\x00hi\x00\x00\x00");
+    try std.testing.expectEqual(@as(u64, 1), sess.stats.chat_received);
+    try std.testing.expect(sess.state == .active);
+    try std.testing.expectEqual(@as(usize, 0), sess.stats.fail_len);
+}
+
+test "handshake and config frames still fail the session (#16 boundary)" {
+    var sess = try Session.init(std.testing.allocator, std.testing.io, .{});
+    defer sess.deinit();
+
+    // auth phase: malformed challenge
+    try std.testing.expectError(error.SessionFailed, sess.onChallenge(&@as([8]u8, @splat(0))));
+    try std.testing.expect(sess.state == .done);
+
+    // steady state: malformed config stays fatal — it is the control message
+    // the interval clock depends on, not a per-item payload like the #16 four
+    var sess2 = try Session.init(std.testing.allocator, std.testing.io, .{});
+    defer sess2.deinit();
+    sess2.state = .active;
+    try std.testing.expectError(error.SessionFailed, sess2.onConfig("\x78\x00\x08"));
+    try std.testing.expect(sess2.state == .done);
 }
