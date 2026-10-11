@@ -138,6 +138,7 @@ fn cmdJoin(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, argv: [
             i += 1;
         } else if (std.mem.eql(u8, a, "--live-period")) {
             opts.live_period = parseInto(u32, next orelse fail(io, "--live-period needs a value", .{})) catch fail(io, "bad --live-period", .{});
+            i += 1;
         } else if (std.mem.eql(u8, a, "--audio-device")) {
             opts.live_device = next orelse fail(io, "--audio-device needs a value", .{});
             i += 1;
