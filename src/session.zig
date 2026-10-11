@@ -893,10 +893,24 @@ pub const Session = struct {
         const cfg = proto.parseConfig(payload) catch {
             return self.failSession("bad config change", .{});
         };
+        self.log.line("S>C 0x02 CONFIG bpm={d} bpi={d}", .{ cfg.bpm, cfg.bpi });
+        // #11: both fields are raw wire values, and a config change is the one
+        // place the client divides by one of them — bpm = 0 reached @divTrunc
+        // below and panicked, while bpi = 0 does not crash but zeroes the
+        // interval length so advanceAudio never produces again. Neither is a
+        // tempo the client can honour, so drop the frame and keep the last
+        // known-good timing; a later valid config can still retime.
+        //
+        // Checked BEFORE the assignments below: adopting bpm = 0 would leave a
+        // session that believes it is running at 0 bpm, which is exactly the
+        // state that made the panic reachable.
+        if (cfg.bpm == 0 or cfg.bpi == 0) {
+            self.log.line("ignoring config: bpm and bpi must both be non-zero", .{});
+            return;
+        }
         const changed = cfg.bpm != self.bpm or cfg.bpi != self.bpi;
         self.bpm = cfg.bpm;
         self.bpi = cfg.bpi;
-        self.log.line("S>C 0x02 CONFIG bpm={d} bpi={d}", .{ cfg.bpm, cfg.bpi });
 
         if (changed) {
             // finalize any in-flight interval cleanly, then adopt new timing
@@ -1095,6 +1109,28 @@ test "multi-channel live capture shares one block per step (channels stay aligne
     for (ba, bb) |x, y| try std.testing.expectEqual(x, y);
     try std.testing.expectEqual(shared[0], ba[0]);
     try std.testing.expectEqual(shared[63], ba[63]);
+}
+
+test "config with bpm=0 or bpi=0 is ignored; later valid config still retimes" {
+    var s = try Session.init(std.testing.allocator, std.testing.io, .{});
+    defer s.deinit();
+
+    // #11: bpm/bpi are raw wire values — bpm=0 must never reach the
+    // @divTrunc(srate * bpi * 60, bpm) in onConfig, and bpi=0 must not zero
+    // the interval length either.
+    try s.onConfig(&[_]u8{ 0, 0, 8, 0 }); // bpm=0 bpi=8
+    try std.testing.expectEqual(@as(u64, 0), s.interval_len_samples);
+    try s.onConfig(&[_]u8{ 120, 0, 0, 0 }); // bpm=120 bpi=0
+    try std.testing.expectEqual(@as(u64, 0), s.interval_len_samples);
+    try s.onConfig(&[_]u8{ 0, 0, 0, 0 }); // bpm=0 bpi=0
+    try std.testing.expectEqual(@as(u64, 0), s.interval_len_samples);
+    try std.testing.expectEqual(@as(u16, 0), s.bpm);
+
+    // a valid config still retimes, and a subsequent one re-anchors again
+    try s.onConfig(&[_]u8{ 120, 0, 8, 0 }); // bpm=120 bpi=8
+    try std.testing.expectEqual(@as(u64, 48000 * 8 * 60 / 120), s.interval_len_samples);
+    try s.onConfig(&[_]u8{ 140, 0, 4, 0 }); // bpm=140 bpi=4
+    try std.testing.expectEqual(@as(u64, 48000 * 4 * 60 / 140), s.interval_len_samples);
 }
 
 test "synthetic sources keep an independent phase per channel" {
