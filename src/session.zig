@@ -131,7 +131,7 @@ pub const Stats = struct {
 const max_users = 32;
 const max_downloads = 8;
 const max_outputs = 16;
-const max_local_channels = 4;
+pub const max_local_channels = 4;
 
 const encode_block_samples = 960; // 20 ms @ 48 kHz
 const chunk_flush_bytes = 2048; // coalesce encoded bytes into >=2KiB chunks
