@@ -978,6 +978,18 @@ pub const Session = struct {
                 rec.username, rec.channel_id, @intFromBool(rec.active), rec.channel_name, rec.flags,
             });
             if (!rec.active) continue;
+            // wire-hostile-audit delta (#12): channel_id is a raw wire byte
+            // and the shift below needs a u5, so ids >= 32 panicked on
+            // @intCast. A channel outside 0..31 cannot name a bit in the u32
+            // subscribe mask — the reference client's mask is u32 too — so the
+            // record has no legitimate meaning. Skipping (not failing the
+            // session) is right: one nonsense record from a quirky server
+            // should not tear down a live session, and the rest of the
+            // message is still good.
+            if (rec.channel_id >= 32) {
+                self.log.line("  ignoring userinfo record: channel {d} is out of range 0..31", .{rec.channel_id});
+                continue;
+            }
             const u = self.findOrAddUser(rec.username) orelse continue;
             const bit = @as(u32, 1) << @intCast(rec.channel_id);
             if (u.mask & bit == 0) {
@@ -1226,4 +1238,60 @@ test "distinct usernames that sanitize alike get distinct WAV paths (#3)" {
         try std.fmt.bufPrint(&exp_d_buf, "{s}/a_b_1_1_ch0.wav", .{out_dir}),
         d.pathSlice(),
     );
+}
+
+test "userinfo records with channel_id >= 32 are skipped instead of shifted" {
+    var s = try Session.init(std.testing.allocator, std.testing.io, .{});
+    defer s.deinit();
+    s.log.quiet = true;
+
+    var f = Fixed{};
+    for ([_]u8{ 32, 40, 255 }) |ch| {
+        try proto.buildUserinfoRecord(.{
+            .active = true,
+            .channel_id = ch,
+            .volume = 0,
+            .pan = 0,
+            .flags = 0,
+            .username = "peer",
+            .channel_name = "boom",
+        }, &f);
+    }
+    try s.onUserinfo(f.slice());
+
+    // skipped before findOrAddUser: no user entry, no mask, no 0x81 reply
+    for (&s.users) |*u| try std.testing.expectEqual(@as(usize, 0), u.name_len);
+    try std.testing.expectEqual(@as(u64, 0), s.stats.msgs_sent);
+}
+
+test "userinfo channel ids 0-31 still drive the mask and the 0x81 reply" {
+    const builtin = @import("builtin");
+    if (builtin.os.tag == .windows) {
+        // needs a real fd for the auto-subscribe reply; no socketpair on win32
+        return error.SkipZigTest;
+    } else {
+        var s = try Session.init(std.testing.allocator, std.testing.io, .{});
+        defer s.deinit();
+        s.log.quiet = true;
+        var fds: [2]std.posix.socket_t = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds));
+        defer _ = std.posix.system.close(fds[1]);
+        s.conn = .{ .io = s.io, .fd = fds[0] };
+
+        var f = Fixed{};
+        try proto.buildUserinfoRecord(.{
+            .active = true,
+            .channel_id = 3,
+            .volume = 0,
+            .pan = 0,
+            .flags = 0,
+            .username = "peer",
+            .channel_name = "gtr",
+        }, &f);
+        try s.onUserinfo(f.slice());
+
+        const u = s.findOrAddUser("peer").?;
+        try std.testing.expectEqual(@as(u32, 1) << 3, u.mask);
+        try std.testing.expectEqual(@as(u64, 1), s.stats.msgs_sent);
+    }
 }
