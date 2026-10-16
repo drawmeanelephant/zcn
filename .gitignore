@@ -5,3 +5,9 @@ demo/work/
 dump/
 *.log
 .DS_Store
+zig-cache/
+docs/site/dist/
+docs/site/.boris-cache/
+docs/site/.pages-profile.json
+docs/site/evidence/
+docs/site/public-site/
