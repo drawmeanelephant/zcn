@@ -1,0 +1,7 @@
+Build Summary: 5/5 steps succeeded
+test success
++- run test zcn-tests cached
+   +- compile test zcn-tests debug native cached 146ms MaxRSS:34M
+      +- options cached
+      +- translate-c cached 81ms MaxRSS:32M
+
