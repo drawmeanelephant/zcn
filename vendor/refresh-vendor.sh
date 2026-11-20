@@ -32,8 +32,8 @@ VORBIS_URL=https://downloads.xiph.org/releases/vorbis/libvorbis-$VORBIS_VER.tar.
 # miniaudio is a single header; 0.11.25 is what src/audio.zig was written
 # against. Objects are transparent in this version (see the header), so an
 # API change here is a compile error rather than silent misbehaviour.
-MINIAUDIO_VER=0.11.25
-MINIAUDIO_SHA=ac7af4de748b7e26b777f37e01cee313a308a7296a3eb080e2906b320cc55c89
+MINIAUDIO_VER=0.11.26
+MINIAUDIO_SHA=6b376c7fbb1352ba1e0e432ab66069b335ea9405e45cb6c30b97ef0f3c9c3e0e
 MINIAUDIO_URL=https://raw.githubusercontent.com/mackron/miniaudio/$MINIAUDIO_VER/miniaudio.h
 
 # stb has no releases; pin the commit.

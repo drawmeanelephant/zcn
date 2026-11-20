@@ -8,7 +8,7 @@ ecosystem. Each dependency is either a single file or a source-only tree.
 | `stb_vorbis.c` | https://github.com/nothings/stb | public domain (Unlicense) / MIT | see file header | Vorbis decoding of peer streams |
 | `libogg/` | https://xiph.org/ogg/ | 1.3.6 | BSD-3-Clause (`libogg/COPYING`) | Ogg container (encode path) |
 | `libvorbis/` | https://xiph.org/vorbis/ | 1.3.7 (2020-07-04) | BSD-3-Clause (`libvorbis/COPYING`) | Vorbis encoding of the local channel |
-| `miniaudio.h` | https://github.com/mackron/miniaudio | 0.11.25 | public domain / MIT-0 | live audio device (Phase B) |
+| `miniaudio.h` | https://github.com/mackron/miniaudio | 0.11.26 | public domain / MIT-0 | live audio device (Phase B) |
 | `miniaudio_impl.c` | this repository | — | same as miniaudio | the single C TU that compiles the header, behind a small shim |
 
 `libvorbis` is 1.3.7 rather than 1.3.6 because that is what this repository's

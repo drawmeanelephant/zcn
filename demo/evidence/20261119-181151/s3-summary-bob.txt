@@ -1,0 +1,54 @@
+[    0.091] audio probe: default_playback="MacBook Pro Speakers" native_srate=0
+[    0.222] live audio ON: device="MacBook Pro Speakers" backend=Core Audio srate=48000 (session 48000)
+[    0.222] playback wav open s3/bob_played.wav
+[    0.222] connecting to 127.0.0.1:20491 as anonymous:bob
+[    0.223] connected
+[    0.229] S>C 0x00 CHALLENGE challenge=a356084ea8dfa1f5 caps=0x00000300 ver=0x00020000 keepalive=3s license=0b
+[    0.229] C>S 0x80 AUTH_USER user=anonymous:bob hash=e430eed722efc7f8606daf07046d4f2c5b3f34ae caps=0
+[    0.235] S>C 0x01 AUTH_OK user=bob@127.0.0.1 maxchan=2
+[    0.235] C>S 0x82 SET_CHANNEL_INFO n=1
+[    0.235] S>C 0x02 CONFIG bpm=100 bpi=8
+[    0.235] capture pre-roll dropped: 960 frames
+[    0.238] interval clock started: 230400 samples (4800ms)
+[    0.238] S>C 0x03 USERINFO nrecords=1 dropped=0
+[    0.238]   user=alice ch=0 active=1 name=alice-live flags=0x00
+[    0.239] C>S 0x81 SET_USERMASK user=alice mask=0x00000001
+[    0.239] S>C 0xC0 CHAT TOPIC:  | zcn interop demo |  | 
+[    0.260] C>S 0x83 UPLOAD_BEGIN guid=d1b042a3939c245f8c2ddc903ce11642 chidx=0 interval=0
+[    0.260] C>S 0x84 WRITE guid=d1b042a3939c245f8c2ddc903ce11642 flags=0 bytes=3548
+[    3.264] C>S KEEPALIVE (idle 3005ms)
+[    3.342] S>C 0x04 DOWNLOAD_BEGIN user=alice ch=0 guid=8d1dcd9812af2d19cf2c8a01eaccfa0f fourcc=0x7647474F estsize=0 limit=16777216
+[    3.342] S>C 0x05 WRITE user=alice bytes=3548 flags=0 total=3548
+[    5.040] C>S 0x84 WRITE guid=d1b042a3939c245f8c2ddc903ce11642 flags=1 bytes=481
+[    5.040] interval 0 complete (230400 samples, 4800ms)
+[    5.064] C>S 0x83 UPLOAD_BEGIN guid=8083a10ce8b5eace08b02794f8787b88 chidx=0 interval=1
+[    5.064] C>S 0x84 WRITE guid=8083a10ce8b5eace08b02794f8787b88 flags=0 bytes=3548
+[    5.891] S>C 0x05 WRITE user=alice bytes=4256 flags=0 total=7804
+[    8.074] C>S KEEPALIVE (idle 3009ms)
+[    8.121] S>C 0x05 WRITE user=alice bytes=3965 flags=1 total=11769
+[    8.121] download complete user=alice ch=0 bytes=11769 fourcc=0x7647474F
+[    8.127] decoded user=alice ch=0 srate=48000 ch=1 frames=230400 rms=0.355580
+[    8.127] wav open s3/B/alice_ch0.wav (srate=48000)
+[    8.145] S>C 0x04 DOWNLOAD_BEGIN user=alice ch=0 guid=58c2a023a1f5267353108c8905765e7e fourcc=0x7647474F estsize=0 limit=16777216
+[    8.145] S>C 0x05 WRITE user=alice bytes=3548 flags=0 total=3548
+[    9.837] C>S 0x84 WRITE guid=8083a10ce8b5eace08b02794f8787b88 flags=1 bytes=481
+[    9.837] interval 1 complete (230400 samples, 4800ms)
+[    9.862] C>S 0x83 UPLOAD_BEGIN guid=618d66c803f9726258793f3764059a87 chidx=0 interval=2
+[    9.862] C>S 0x84 WRITE guid=618d66c803f9726258793f3764059a87 flags=0 bytes=3548
+[   10.689] S>C 0x05 WRITE user=alice bytes=4255 flags=0 total=7803
+[   12.872] C>S KEEPALIVE (idle 3011ms)
+[   12.920] S>C 0x05 WRITE user=alice bytes=3964 flags=1 total=11767
+[   12.921] download complete user=alice ch=0 bytes=11767 fourcc=0x7647474F
+[   12.925] decoded user=alice ch=0 srate=48000 ch=1 frames=230400 rms=0.355599
+[   12.945] S>C 0x04 DOWNLOAD_BEGIN user=alice ch=0 guid=bda5132c492b7dca4de279988fa5e01a fourcc=0x7647474F estsize=0 limit=16777216
+[   12.945] S>C 0x05 WRITE user=alice bytes=3548 flags=0 total=3548
+[   14.646] C>S 0x84 WRITE guid=618d66c803f9726258793f3764059a87 flags=1 bytes=481
+[   14.646] interval 2 complete (230400 samples, 4800ms)
+[   14.670] C>S 0x83 UPLOAD_BEGIN guid=fcf4a2e063e6605cb4e7c6ea05f2b2e5 chidx=0 interval=3
+[   14.670] C>S 0x84 WRITE guid=fcf4a2e063e6605cb4e7c6ea05f2b2e5 flags=0 bytes=3548
+[   15.007] wav s3/B/alice_ch0.wav frames=460800 srate=48000 rms=0.355565 peak=0.522949
+[   15.009] playback wav s3/bob_played.wav frames=460800 srate=48000 rms=0.355565 peak=0.522949
+[   15.009] live audio stats: device_frames=709920 queued_tx=5063 queued_rx=130560
+[   15.009] live audio rings: capture underrun=5055 overrun=0 | playback underrun=379680 overrun=0
+[   15.062] session end: ok=true
+RESULT ok=true err="" msgs_sent=17 msgs_recv=15 bytes_sent=16006 bytes_recv=27456 intervals_uploaded=3 upload_channels=1 upload_chunks=7 upload_bytes=15635 intervals_downloaded=2 download_bytes=27084 samples_decoded=460800 chat_sent=0 chat_received=1 wav_count=1 wav_rms_avg=0.355565 live=true device="MacBook Pro Speakers" dev_srate=48000 capture_frames=703897 capture_starved=5055 capture_rms=0.000000 capture_peak=0.000000 playback_frames=460800 playback_rms=0.355589 playback_peak=0.522985 audio_underruns=384735 audio_overruns=0

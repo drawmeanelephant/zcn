@@ -12,7 +12,7 @@ Zig sources here are a clean-room implementation of the wire protocol, and
 the vendored dependencies keep their own licenses (see
 [`vendor/README.md`](vendor/README.md)).
 
-* Zig 0.17.0, no package manager, no ecosystems.
+* Zig 0.17.x (0.17.0 minimum, CI runs 0.17.1), no package manager, no ecosystems.
 * Vendored dependencies, source only: `stb_vorbis.c` (decode),
   `libogg` + `libvorbis` (encode), `miniaudio.h` (live device).
 * Statically linked; no runtime dependency beyond system libc / system audio
@@ -116,7 +116,7 @@ Things that will break it, and what to do:
 ## Continuous integration
 
 `.github/workflows/ci.yml` verifies the vendored sources against their
-upstream pins, installs Zig 0.17.0, runs `zig build test`, builds the release
+upstream pins, installs Zig 0.17.1, runs `zig build test`, builds the release
 binary and smoke-tests it against a committed evidence WAV — on macOS, Linux
 and Windows. Linux additionally cross-builds a static musl binary and asserts
 it is statically linked. macOS exercises live audio (miniaudio + Core Audio);
